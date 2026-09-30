@@ -881,6 +881,9 @@ def test_windows_daemon_definition_restarts_and_stops_cleanly(tmp_home=None):
 
     plan = build_daemon_plan(Config(port=9000), system="windows")
     assert "goto loop" in plan.content and "daemon.stop" in plan.content
+    # `timeout` needs an interactive console; without one it returns at once and
+    # a crash loop would spin. The delay must not depend on a console.
+    assert "timeout /t" not in plan.content and "ping -n" in plan.content
     assert "daemon.log" in plan.content
     assert "--upstream" not in plan.content          # hooks-only daemon
     assert plan.start_cmd == ["schtasks", "/Run", "/TN", "AgentGuard"]

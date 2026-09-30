@@ -298,7 +298,9 @@ WantedBy=default.target
             ":loop\r\n"
             f'{command} >> "%AGENTGUARD_HOME%\\daemon.log" 2>&1\r\n'
             'if exist "%AGENTGUARD_HOME%\\daemon.stop" goto end\r\n'
-            "timeout /t 5 /nobreak >nul\r\n"
+            # A 5 s pause between restarts. Not `timeout`: it exits immediately
+            # without an interactive console, turning a crash loop into a spin.
+            "ping -n 6 127.0.0.1 >nul\r\n"
             "goto loop\r\n"
             ":end\r\n"
         )
@@ -309,7 +311,7 @@ WantedBy=default.target
         return DaemonPlan(
             "windows", path, content,
             ["schtasks", "/Create", "/TN", WINDOWS_TASK_NAME,
-             "/TR", f'wscript.exe "{launcher}"', "/SC", "ONLOGON", "/F"],
+             "/TR", f"wscript.exe {_quote(str(launcher))}", "/SC", "ONLOGON", "/F"],
             f"agentguard daemon stop && schtasks /Delete /TN {WINDOWS_TASK_NAME} /F",
             extra_files={launcher: vbs},
             start_cmd=["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME],
@@ -326,12 +328,14 @@ def install_daemon(config: Config, *, system: str | None = None,
     """Write the service definition. Only activates when explicitly asked."""
     plan = build_daemon_plan(config, system=system, home=home)
     plan.path.parent.mkdir(parents=True, exist_ok=True)
-    plan.path.write_text(plan.content, encoding="utf-8")
+    # newline="": the content already carries its line endings (CRLF for the
+    # Windows files). Text mode would turn each \r\n into \r\r\n on Windows.
+    plan.path.write_text(plan.content, encoding="utf-8", newline="")
     if plan.platform == "windows":
         os.chmod(plan.path, 0o755)
     for extra_path, extra_content in (plan.extra_files or {}).items():
         extra_path.parent.mkdir(parents=True, exist_ok=True)
-        extra_path.write_text(extra_content, encoding="utf-8")
+        extra_path.write_text(extra_content, encoding="utf-8", newline="")
 
     if activate:
         for step in (plan.activate_cmd, plan.start_cmd):

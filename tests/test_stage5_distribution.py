@@ -457,3 +457,16 @@ def test_daemon_command_parses_without_an_upstream(home, workdir):
 
     args = build_parser().parse_args(_gateway_args(Config(port=9000)))
     assert args.cmd == "proxy" and args.upstream is None and args.port == 9000
+
+
+def test_windows_launcher_has_plain_crlf_line_endings(home, workdir):
+    """Regression: the launcher was built with \r\n and then written in text mode,
+    which on Windows turned every line ending into \r\r\n - a stray carriage return
+    that cmd.exe can read as part of `goto loop`."""
+    from agentguard.onboarding import install_daemon
+
+    plan = install_daemon(Config(port=9000), system="windows", home=workdir)
+    for path in [plan.path, *(plan.extra_files or {})]:
+        raw = path.read_bytes()
+        assert b"\r\r\n" not in raw, path.name
+        assert raw.count(b"\r\n") == raw.count(b"\n"), f"{path.name}: every newline is CRLF"
