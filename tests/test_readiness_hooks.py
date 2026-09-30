@@ -900,3 +900,16 @@ def test_shipped_policy_lists_the_hook_patterns_explicitly():
     shipped = load(ROOT / "agentguard.policy.yaml")
     assert shipped.hooks.bash == DEFAULT_HOOK_BASH
     assert shipped.hooks.self_protection is True
+
+
+def test_audit_listing_shows_the_source(monkeypatch, capsys):
+    home = tempfile.mkdtemp(prefix="ag-aud-")
+    try:
+        monkeypatch.setenv("AGENTGUARD_HOME", home)
+        _engine(None).handle(pre("Bash", {"command": "echo agentguard-test"}))
+        assert _cli("audit", "--last", "5") == 0
+        out = capsys.readouterr().out
+        assert "source" in out.splitlines()[0]
+        assert any("hook" in line and "Bash" in line for line in out.splitlines()[2:])
+    finally:
+        shutil.rmtree(home, ignore_errors=True)

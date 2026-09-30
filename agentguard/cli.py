@@ -103,10 +103,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
         print("no decisions recorded yet")
         return 0
     # Date included: time alone made old rows look like today's traffic.
-    table = [[str(r["id"]), f"{r['ts'][:10]} {r['ts'][11:19]}", r["verdict"],
-              f"{r['score'] or 0:.2f}", r["tool"] or "-", (r["reason"] or "")[:52]]
+    table = [[str(r["id"]), f"{r['ts'][:10]} {r['ts'][11:19]}", r.get("source") or "mcp",
+              r["verdict"], f"{r['score'] or 0:.2f}", r["tool"] or "-",
+              (r["reason"] or "")[:52]]
              for r in rows]
-    print(_table(table, ["id", "when (UTC)", "verdict", "score", "tool", "reason"]))
+    print(_table(table, ["id", "when (UTC)", "source", "verdict", "score", "tool", "reason"]))
     return 0
 
 

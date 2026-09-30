@@ -11,7 +11,7 @@ Nothing leaves your machine.
 behaviour monitoring, the red-team simulator, the distribution layer, the validation
 tooling, and the September 2026 threat update (worm detection, volume-aware DLP,
 declared task scope, a financial tier with a global lock, and a
-[standards mapping](docs/standards-mapping.md)). 291 tests pass. Every Stage 7 detector
+[standards mapping](docs/standards-mapping.md)). 292 tests pass. Every Stage 7 detector
 ships observe-only like everything else. See
 [What's built so far](#whats-built-so-far) for the honest breakdown.
 
@@ -615,7 +615,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-291 tests, one file per stage. The ones that matter most are the four attack
+292 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -765,7 +765,7 @@ docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
 docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           291 tests, one file per stage
+tests/           292 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").
