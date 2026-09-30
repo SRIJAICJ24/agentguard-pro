@@ -470,3 +470,21 @@ def test_windows_launcher_has_plain_crlf_line_endings(home, workdir):
         raw = path.read_bytes()
         assert b"\r\r\n" not in raw, path.name
         assert raw.count(b"\r\n") == raw.count(b"\n"), f"{path.name}: every newline is CRLF"
+
+
+def test_background_daemon_is_pointed_at_the_policy_file(home, workdir, monkeypatch):
+    """Regression: the service starts outside the project folder (Task Scheduler,
+    systemd, launchd), where the upward policy search finds nothing, so it silently
+    ran on built-in defaults and ignored edits to agentguard.policy.yaml. Onboarding
+    now records the policy path and the service passes it explicitly."""
+    from agentguard.cli import build_parser
+    from agentguard.onboarding import _gateway_args, onboard
+
+    monkeypatch.chdir(workdir)
+    config = onboard(non_interactive=True, policy_dir=workdir)
+    expected = str((workdir / "agentguard.policy.yaml").resolve())
+    assert config.policy_file == expected
+    assert cfg.load().policy_file == expected
+
+    args = build_parser().parse_args(_gateway_args(config))
+    assert args.policy == expected and args.cmd == "proxy"

@@ -204,7 +204,11 @@ def _command_line(parts: list[str]) -> str:
 
 
 def _gateway_args(config: Config) -> list[str]:
-    args = ["proxy", "--port", str(config.port)]
+    # A service starts outside the project folder, where the upward search for
+    # agentguard.policy.yaml finds nothing - so name the policy explicitly.
+    # (`--policy` is a top-level option and must come before the subcommand.)
+    args = ["--policy", config.policy_file] if config.policy_file else []
+    args += ["proxy", "--port", str(config.port)]
     if config.upstream:
         args += ["--upstream", config.upstream]
     if config.enforcement:
@@ -400,14 +404,21 @@ def onboard(*, input_fn: InputFn = input, non_interactive: bool = False,
         if problems:
             raise cfg.ConfigError("; ".join(problems))
 
+    policy = write_starter_policy(policy_dir, enforcement=config.enforcement)
+    # Record which policy this installation uses, so the background service (which
+    # doesn't start in this folder) loads the same file.
+    policy_path = (policy_dir or Path.cwd()) / "agentguard.policy.yaml"
+    if policy_path.is_file():
+        config.policy_file = str(policy_path.resolve())
+
     path = cfg.save(config)
     print(f"\n  wrote {path}")
-
-    policy = write_starter_policy(policy_dir, enforcement=config.enforcement)
     if policy:
         print(f"  wrote {policy}")
     else:
         print("  kept the existing agentguard.policy.yaml (not overwritten)")
+    if config.policy_file:
+        print(f"  policy for the daemon: {config.policy_file}")
 
     if install_daemon_flag:
         try:
