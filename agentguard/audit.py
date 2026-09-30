@@ -28,8 +28,21 @@ def _now() -> str:
 HASHED_FIELDS = ("ts", "session_id", "agent", "role", "stage", "tool",
                  "args_digest", "score", "verdict", "reason", "signals", "detail")
 
+#: Hash-chain format versions. Version 1 is every row written before the
+#: `source` column existed; version 2 also covers `source`. Each row stores its
+#: version, so old rows keep verifying unchanged after the migration, and a row
+#: whose version is flipped to dodge coverage no longer matches its stored hash.
+HASH_VERSION = 2
+_FIELDS_BY_VERSION: dict[int, tuple[str, ...]] = {
+    1: HASHED_FIELDS,
+    2: HASHED_FIELDS + ("source",),
+}
 
-def _normalise(fields: dict[str, Any]) -> dict[str, Any]:
+SOURCE_MCP = "mcp"
+SOURCE_HOOK = "hook"
+
+
+def _normalise(fields: dict[str, Any], keys: tuple[str, ...] = HASHED_FIELDS) -> dict[str, Any]:
     """Coerce field types to what SQLite will hand back on read.
 
     This exists because of a real bug: an empty signal list made `score` a Python
@@ -39,7 +52,7 @@ def _normalise(fields: dict[str, Any]) -> dict[str, Any]:
     rather than by coincidence.
     """
     out: dict[str, Any] = {}
-    for key in HASHED_FIELDS:
+    for key in keys:
         value = fields.get(key)
         if key == "score":
             out[key] = None if value is None else float(value)
@@ -53,8 +66,14 @@ def _canonical(fields: dict[str, Any]) -> str:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _entry_hash(prev_hash: str, fields: dict[str, Any]) -> str:
-    return hashlib.sha256((prev_hash + _canonical(_normalise(fields))).encode()).hexdigest()
+def _entry_hash(prev_hash: str, fields: dict[str, Any], version: int = 1) -> str:
+    keys = _FIELDS_BY_VERSION.get(int(version))
+    if keys is None:
+        # An unknown version can't be verified; make it fail rather than pass.
+        return "unknown-hash-version"
+    return hashlib.sha256(
+        (prev_hash + _canonical(_normalise(fields, keys))).encode()
+    ).hexdigest()
 
 
 def digest_args(arguments: Any, limit: int = 300) -> str:
@@ -86,8 +105,13 @@ def record(
     role: str | None = None,
     detail: str | None = None,
     db_path: str | Path | None = None,
+    source: str = SOURCE_MCP,
 ) -> int:
-    """Append one decision. Returns the new row id."""
+    """Append one decision. Returns the new row id.
+
+    `source` says which surface saw the call: the MCP gateway (`mcp`) or a
+    Claude Code hook (`hook`). It is covered by the hash chain.
+    """
     conn = connect(db_path)
     row = conn.execute("SELECT entry_hash FROM audit ORDER BY id DESC LIMIT 1").fetchone()
     prev_hash = row["entry_hash"] if row else GENESIS
@@ -105,15 +129,19 @@ def record(
         "reason": decision.reason,
         "signals": _canonical([s.to_dict() for s in decision.signals]),
         "detail": detail,
+        "source": source,
     }
-    entry_hash = _entry_hash(prev_hash, entry)
+    entry_hash = _entry_hash(prev_hash, entry, HASH_VERSION)
 
     cur = conn.execute(
         """INSERT INTO audit (ts, session_id, agent, role, stage, tool, args_digest,
-                              score, verdict, reason, signals, detail, prev_hash, entry_hash)
+                              score, verdict, reason, signals, detail, prev_hash,
+                              entry_hash, source, hash_v)
            VALUES (:ts,:session_id,:agent,:role,:stage,:tool,:args_digest,
-                   :score,:verdict,:reason,:signals,:detail,:prev_hash,:entry_hash)""",
-        {**entry, "prev_hash": prev_hash, "entry_hash": entry_hash},
+                   :score,:verdict,:reason,:signals,:detail,:prev_hash,:entry_hash,
+                   :source,:hash_v)""",
+        {**entry, "prev_hash": prev_hash, "entry_hash": entry_hash,
+         "hash_v": HASH_VERSION},
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -139,8 +167,9 @@ def verify_chain(db_path: str | Path | None = None) -> tuple[bool, int | None]:
     conn = connect(db_path)
     prev_hash = GENESIS
     for r in conn.execute("SELECT * FROM audit ORDER BY id ASC"):
-        entry = {key: r[key] for key in HASHED_FIELDS}
-        expect = _entry_hash(prev_hash, entry)
+        version = r["hash_v"]
+        entry = {key: r[key] for key in _FIELDS_BY_VERSION.get(version, HASHED_FIELDS)}
+        expect = _entry_hash(prev_hash, entry, version)
         if r["prev_hash"] != prev_hash or r["entry_hash"] != expect:
             return False, int(r["id"])
         prev_hash = r["entry_hash"]

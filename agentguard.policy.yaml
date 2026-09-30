@@ -126,6 +126,47 @@ financial:
   enabled: true
   # session_cap: {amount: 200, currency: USD}
 
+# --- Claude Code hooks (readiness phase) --------------------------------------
+# What AgentGuard does with Claude Code's own tools (Bash, PowerShell, Read,
+# Write, Edit, WebFetch, WebSearch, ...), delivered by the hooks that
+# `agentguard install-hooks` registers. Observe mode never interferes: it logs
+# what it would do. Enforce mode: BLOCK -> deny, REVIEW -> ask (Claude Code's own
+# permission prompt). Patterns are Python regexes, matched case-insensitively
+# against the whole shell command; a list given here replaces that default list.
+hooks:
+  enabled: true
+  # MCP servers already routed through the AgentGuard gateway. The gateway gates
+  # (and logs) their calls; the hook only bridges taint, so nothing counts twice.
+  gateway_servers: ["agentguard"]
+  # A network command to any other host joins the exfiltration tier.
+  allow_hosts: ["localhost", "127.0.0.1", "::1"]
+  untrusted_tools: ["WebFetch", "WebSearch"]   # their results are taint sources
+  bash:
+    exfiltration:
+      - '\b(curl|wget|nc|ncat|netcat|socat|telnet|scp|sftp|ftp|rsync)\b'
+      - '\b(Invoke-WebRequest|Invoke-RestMethod|iwr|Start-BitsTransfer)\b'
+    propagation:
+      - '\bgit\s+(commit|push)\b'
+      - '\bgh\s+(pr|issue)\s+(create|comment|edit|review)\b'
+      - '(?<![0-9&=\-])>{1,2}\s*(?!&|/dev/null\b|\$null\b|nul\b)[^\s|&;>]+'
+      - '\b(Set-Content|Add-Content|Out-File)\b'
+    destructive:                   # -> REVIEW
+      - '\brm\s+(-[a-z]*r[a-z]*|--recursive)\b'
+      - '\bRemove-Item\b[^\n]*-Recurse\b'
+      - '\b(rmdir|rd)\s+/s\b'
+      - '\bdel\s+(/[a-z]\s+)*/s\b'
+      - '\bmkfs(\.\w+)?\b'
+      - '\bdd\s+[^\n]*\bof=/dev/'
+      - '\bformat\s+[a-z]:'
+      - '\b(diskpart|shred|wipefs)\b'
+      - '\bFormat-Volume\b|\bClear-Disk\b'
+  # Writes, edits and shell commands touching AgentGuard's own config, policy,
+  # audit database, the Claude Code settings that register these hooks, or its
+  # daemon -> REVIEW, and deny in enforce mode. This raises the bar; it does not
+  # stop a determined process running as the same user.
+  self_protection:
+    enabled: true
+
 quarantine:
   ttl_hours:
     default: 24       # web-sourced content expires after a day

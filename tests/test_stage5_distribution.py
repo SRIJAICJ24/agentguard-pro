@@ -446,3 +446,14 @@ def test_cli_configure_reports_failure(home, capsys):
     cfg.save(Config())
     assert main(["configure", "colour", "blue"]) == 1
     assert "failed" in capsys.readouterr().err
+
+
+def test_daemon_command_parses_without_an_upstream(home, workdir):
+    """Regression: with no upstream configured (someone who uses no MCP servers),
+    the generated service ran `proxy --port N`, but `proxy` required --upstream, so
+    the background service would exit immediately on every start."""
+    from agentguard.cli import build_parser
+    from agentguard.onboarding import _gateway_args
+
+    args = build_parser().parse_args(_gateway_args(Config(port=9000)))
+    assert args.cmd == "proxy" and args.upstream is None and args.port == 9000

@@ -1,0 +1,18 @@
+{
+  "source": "docs: code.claude.com/docs/en/hooks (PreToolUse input)",
+  "payload": {
+    "session_id": "doc-session-1",
+    "transcript_path": "/home/user/.claude/projects/p/doc-session-1.jsonl",
+    "cwd": "/home/user/my-project",
+    "permission_mode": "default",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/home/user/my-project/a.txt",
+      "old_string": "original text",
+      "new_string": "replacement text",
+      "replace_all": false
+    },
+    "tool_use_id": "toolu_doc_edit"
+  }
+}

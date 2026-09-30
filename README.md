@@ -11,7 +11,7 @@ Nothing leaves your machine.
 behaviour monitoring, the red-team simulator, the distribution layer, the validation
 tooling, and the September 2026 threat update (worm detection, volume-aware DLP,
 declared task scope, a financial tier with a global lock, and a
-[standards mapping](docs/standards-mapping.md)). 202 tests pass. Every Stage 7 detector
+[standards mapping](docs/standards-mapping.md)). 289 tests pass. Every Stage 7 detector
 ships observe-only like everything else. See
 [What's built so far](#whats-built-so-far) for the honest breakdown.
 
@@ -167,6 +167,62 @@ launchd plist on macOS, a Task Scheduler launcher on Windows — and then prints
 command to enable it. It does **not** start the service for you. Registering a
 background process that intercepts your agent's tool calls is not something an install
 wizard should do silently; add `--activate` if you want it enabled in the same step.
+
+On Windows, `--activate` registers a logon task and starts it immediately. The task
+runs the daemon with no console window, restarts it if it exits, and logs to
+`~/.agentguard/daemon.log`. `agentguard daemon status` shows whether it's answering, and
+`agentguard daemon stop` stops it without the launcher restarting it.
+
+With no MCP upstream configured, the daemon serves only the Claude Code hook endpoint.
+That is the setup for someone who uses Claude Code but no MCP servers.
+
+---
+
+## Claude Code hooks: seeing Claude Code's own tools
+
+The MCP gateway only sees MCP traffic. Claude Code's built-in tools (`Bash`, `PowerShell`,
+`Read`, `Write`, `Edit`, `WebFetch`, `WebSearch`, …) never go through MCP, and for most
+people that's where the risk is. Claude Code's `PreToolUse` / `PostToolUse` hooks send those
+calls to the AgentGuard daemon, which runs them through the same scanner, taint, sink,
+propagation and DLP checks as the gateway.
+
+```bash
+agentguard proxy                 # the daemon: hook endpoint (+ MCP gateway with --upstream)
+agentguard install-hooks         # register the hooks in your Claude Code user settings
+agentguard doctor                # checks the hooks are installed AND the daemon answers
+```
+
+`install-hooks` merges into `~/.claude/settings.json` (or `CLAUDE_CONFIG_DIR`). It writes a
+timestamped backup first, refuses a file that isn't valid JSON, keeps every other hook, and
+is idempotent. `uninstall-hooks` removes only AgentGuard's entries. `--project` / `--local`
+target this project's `.claude/settings.json` / `settings.local.json` instead.
+
+| Tool | What AgentGuard checks |
+|---|---|
+| `Bash` / `PowerShell` | secrets and credential paths anywhere in the command. Network commands (`curl`, `wget`, `nc`, `scp`, `Invoke-WebRequest`, …) to hosts outside `hooks.allow_hosts` join the **exfiltration** tier. `git commit`/`push` and output redirected into files join the **propagation** tier. Recursive deletes and disk-level commands → **REVIEW**. All patterns live in `agentguard.policy.yaml` under `hooks.bash` |
+| `Read` / `Write` / `Edit` | path denylist; secret scan on written content; writes join the propagation tier (worm detection, DLP) |
+| `WebFetch` / `WebSearch` | results are **untrusted** and fingerprinted into the session's taint map, so a later `Write` or `curl` of that text is caught |
+| MCP tools | gated by the hook, unless the server is routed through the AgentGuard gateway (`hooks.gateway_servers`), in which case only the gateway counts it |
+
+**Observe mode never interferes.** Every call is logged (`source = hook` in the audit log),
+and Claude Code's normal permission flow decides. In **enforce mode**, BLOCK → deny and
+REVIEW → ask: Claude Code's own permission prompt is the review step, and an ask you
+approve is counted in `report` as a false-positive candidate. AgentGuard never answers
+"allow", because that would skip Claude Code's own prompts.
+
+**If the daemon is down**, the HTTP hook fails open (Claude Code treats it as a non-blocking
+error, and that can't be changed). If you need fail-closed, install the stdlib-only command
+hook: `agentguard install-hooks --fail-closed`.
+
+**Self-protection.** Writes, edits and shell commands that touch AgentGuard's config, policy
+file, audit database, the Claude Code settings files that register the hooks, or that stop
+the daemon go to REVIEW, and are denied in enforce mode. **This raises the bar; it does not
+stop a determined process running as the same user.** Anything with your file permissions
+can edit those files or kill the daemon by a route the patterns don't recognise, or while
+the daemon isn't running.
+
+Details, the verified hook schema, and what differed from expectations:
+[docs/claude-code-hooks-notes.md](docs/claude-code-hooks-notes.md).
 
 ---
 
@@ -482,7 +538,12 @@ agentguard lock --all | --session <id> | --status   # refuse every call, now
 agentguard unlock --all | --session <id>
 agentguard dashboard                 # local web UI
 agentguard simulate                  # red-team run + security score
-agentguard proxy --upstream <target> # run the gateway
+agentguard proxy --upstream <target> # run the gateway (+ hook endpoint)
+agentguard proxy                     # hook endpoint only (no MCP servers)
+agentguard install-hooks [--project|--local] [--type command] [--fail-closed]
+agentguard uninstall-hooks [--project|--local]
+agentguard daemon status | stop      # the background daemon
+agentguard report --since 7d --by-source   # mcp gateway vs Claude Code hooks
 ```
 
 The audit-chain timeline is genuinely readable:
@@ -554,7 +615,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-202 tests, one file per stage. The ones that matter most are the four attack
+289 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -598,7 +659,8 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 - [x] **Stage 7C** — declared task scope (CLI and per-role), control-plane tamper guard, optional local AlignmentAuditor (off by default)
 - [x] **Stage 7D** — financial tier, session cap, hash-chained payment receipts, `lock --all` / `unlock`
 - [x] **Stage 7E** — [standards mapping](docs/standards-mapping.md) with a Gaps column
-- [ ] **The validation week itself** — not yet run. This is the gate on everything below. Stage 7 detectors should be measured in the same week.
+- [x] **Readiness A** — Claude Code hooks (HTTP endpoint + stdlib command fallback), tool mapping for Bash/PowerShell/Read/Write/Edit/WebFetch/WebSearch/MCP, gateway↔hook taint bridge, observe/enforce mapping, self-protection, `install-hooks`/`uninstall-hooks`, `source` column with a chain-preserving migration, `report --by-source`, hooks-only daemon that restarts on Windows
+- [ ] **The validation week itself** — not yet run. This is the gate on everything below. Stage 7 detectors and the hooks should be measured in the same week.
 - [ ] Packaged install (`pipx install agentguard` once published to PyPI)
 
 ### Known limitations, stated plainly
@@ -645,6 +707,20 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 - **`*email*` in the default exfiltration globs also matches `email.read*`.** A mail
   *read* whose arguments carry tainted text is therefore treated as egress. This dates
   from Stage 2.5 and is left unchanged.
+- **Hooks see tool calls, not intent.** A Bash command is judged by its text. A script
+  that does the damage internally (`python do_it.py`) looks harmless to the command
+  patterns. Self-protection is pattern-based and raises the bar only; it does not stop a
+  determined process running as your user.
+- **Hook latency is real.** Measured on this Windows machine, the HTTP hook costs about
+  7–8 ms p50 per call when the connection is reused and about 22–31 ms when each call opens
+  a new one (whether Claude Code reuses connections isn't documented). A 200-line `Write`
+  costs about 48–63 ms, mostly the Stage 1 detect-secrets pass. The command-hook fallback
+  costs about 290 ms per call, most of it starting Python.
+- **The gateway↔hook taint bridge is correlation, not identity.** It links an MCP call to a
+  Claude Code session only when the hook saw the identical call in the previous 30 s, and
+  links nothing when that's ambiguous.
+- **In observe mode a lock doesn't stop Claude Code's own tools.** Observe mode never answers
+  "deny", by design. The MCP gateway still honours locks in every mode.
 
 ---
 
@@ -679,12 +755,17 @@ agentguard/
   alignment.py   AlignmentAuditor interface, no-op default, local adapter    (7C)
   financial.py   financial tier, amount/payee extraction, receipts           (7D)
   locks.py       CLI-set locks honoured by every running gateway             (7D)
+  hooks.py       Claude Code hook engine: tool mapping, taint bridge          (A)
+  hookclient.py  `agentguard hook`: stdlib-only command hook                  (A)
+  hookinstall.py install/uninstall hooks in Claude Code settings              (A)
+  daemonctl.py   `agentguard daemon status|stop`                              (A)
   cli.py         command line interface
 docs/BUILD_PROMPTS.md       the staged build specification
 docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
+docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           202 tests, one file per stage
+tests/           289 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").

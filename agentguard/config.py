@@ -60,6 +60,11 @@ class Config:
     agent: str | None = None
     role: str | None = None
     policy_file: str | None = None
+    # Claude Code command hook (`agentguard hook`): what to do when the daemon is
+    # down or slower than `hook_timeout` seconds. HTTP hooks always fail open;
+    # that is Claude Code's behaviour, not a setting.
+    hook_fail_mode: str = "open"
+    hook_timeout: float = 2.0
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -86,6 +91,13 @@ class Config:
                 problems.append(f"{name} must be between 1 and 65535, got {value}")
         if not isinstance(self.dashboard, bool):
             problems.append(f"dashboard must be true or false, got {self.dashboard!r}")
+        if self.hook_fail_mode not in ("open", "closed"):
+            problems.append(f"hook_fail_mode must be 'open' or 'closed', "
+                            f"got {self.hook_fail_mode!r}")
+        if not isinstance(self.hook_timeout, (int, float)) or isinstance(self.hook_timeout, bool) \
+                or not (0 < float(self.hook_timeout) <= 30):
+            problems.append(f"hook_timeout must be a number of seconds in (0, 30], "
+                            f"got {self.hook_timeout!r}")
         if not problems and self.dashboard and self.port == self.dashboard_port:
             problems.append(
                 f"port and dashboard_port are both {self.port}; they must differ"

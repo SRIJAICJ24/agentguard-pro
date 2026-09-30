@@ -243,6 +243,30 @@ class TaintMap:
                 best = overlap
         return best
 
+    def absorb(self, other: "TaintMap", prefix: str = "") -> int:
+        """Merge another session's untrusted records into this map. Idempotent.
+
+        Used by the Claude Code hook bridge: when a gateway call is correlated
+        with a Claude Code session, that session's taint (a WebFetch result, say)
+        must count against the gateway call too. Returns how many records were new.
+        """
+        seen = getattr(self, "_absorbed", None)
+        if seen is None:
+            seen = self._absorbed = set()
+        added = 0
+        for rec in other.records:
+            if id(rec) in seen:
+                continue
+            seen.add(id(rec))
+            source = f"{prefix}{rec.source_tool}"
+            self.records.append(TaintRecord(source_tool=source, fingerprints=rec.fingerprints,
+                                            timestamp=rec.timestamp, label=rec.label,
+                                            excerpt=rec.excerpt))
+            for fp in rec.fingerprints:
+                self._index.setdefault(fp, set()).add(source)
+            added += 1
+        return added
+
     def overlap_regions(self, text: str) -> list[str]:
         """Substrings of `text` copied from untrusted content seen this session."""
         return overlap_regions(text, self._index.keys())
@@ -274,6 +298,10 @@ class TaintRegistry:
         if session_id not in self._maps:
             self._maps[session_id] = TaintMap(session_id)
         return self._maps[session_id]
+
+    def get(self, session_id: str) -> TaintMap | None:
+        """The session's map if it exists - never creates one."""
+        return self._maps.get(session_id)
 
     def drop(self, session_id: str) -> None:
         self._maps.pop(session_id, None)

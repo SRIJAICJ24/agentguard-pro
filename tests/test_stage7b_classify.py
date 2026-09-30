@@ -241,3 +241,22 @@ def test_classification_stays_inside_the_fast_path_budget():
             clf.assess("email.send", args, tiers, None)
         avg_ms = (time.perf_counter() - start) / 50 * 1000
         assert avg_ms < budget, f"classification averaged {avg_ms:.2f}ms (budget {budget})"
+
+
+def test_a_write_destination_is_not_an_unscanned_attachment():
+    """Regression: a file-write tool's `file_path` is where the content goes, not
+    an attachment, so a propagation-only call must not log dlp:unscanned_attachment.
+    Found when Claude Code's Write tool started flowing through the hooks."""
+    from agentguard.classify import DataClassifier
+    from agentguard.policy import Policy
+
+    out = DataClassifier(Policy()).assess(
+        "Write", {"file_path": "/home/me/project/notes.md", "content": "hello"},
+        ["ordinary", "propagation"], None)
+    assert not any(s.name == "dlp:unscanned_attachment" for s in out.signals)
+
+    # ...while a file passed by path to an egress sink still is one.
+    out = DataClassifier(Policy()).assess(
+        "email.send", {"to": "a@example.com", "file_path": "/tmp/q3.xlsx"},
+        ["exfiltration", "propagation"], None)
+    assert any(s.name == "dlp:unscanned_attachment" for s in out.signals)

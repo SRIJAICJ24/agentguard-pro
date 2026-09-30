@@ -52,6 +52,8 @@ DEFAULT_SINKS: dict[str, list[str]] = {
         "git.commit*", "*git_commit*",
         "*add_comment*", "*create_comment*", "*post_comment*", "*create_issue*",
         "*pull_request*",
+        # GitHub MCP server names that the patterns above miss
+        "*issue_comment*", "*create_or_update_file*", "*push_files*",
         "*update_document*", "*edit_document*",
         "*post_message*", "*slack*post*", "*slack*send*", "*chat*post*", "*chat*send*",
         "email.send", "*send_email*", "*send_mail*",
@@ -181,6 +183,125 @@ class FinancialConfig:
     cap_currency: str | None = None
 
 
+#: Default Claude Code hook patterns (readiness phase). They live here only so a
+#: missing `hooks:` section still gets sane behaviour; the shipped policy YAML
+#: lists them explicitly, and anything under `hooks.bash.*` in YAML replaces the
+#: corresponding list. All are Python regular expressions matched against the
+#: whole shell command (Bash or PowerShell tool), case-insensitively.
+DEFAULT_HOOK_BASH: dict[str, list[str]] = {
+    # network egress commands - the call joins the exfiltration tier unless every
+    # destination host it names is allowlisted
+    "exfiltration": [
+        r"\b(curl|wget|nc|ncat|netcat|socat|telnet|scp|sftp|ftp|rsync)\b",
+        r"\b(Invoke-WebRequest|Invoke-RestMethod|iwr|Start-BitsTransfer)\b",
+    ],
+    # commands that publish to a surface other people or agents read
+    "propagation": [
+        r"\bgit\s+(commit|push)\b",
+        r"\bgh\s+(pr|issue)\s+(create|comment|edit|review)\b",
+        # output redirected into a file (not /dev/null, not fd duplication)
+        r"(?<![0-9&=\-])>{1,2}\s*(?!&|/dev/null\b|\$null\b|nul\b)[^\s|&;>]+",
+        r"\b(Set-Content|Add-Content|Out-File)\b",
+    ],
+    # recursive deletes and disk-level commands -> REVIEW
+    "destructive": [
+        r"\brm\s+(-[a-z]*r[a-z]*|--recursive)\b",
+        r"\bRemove-Item\b[^\n]*-Recurse\b",
+        r"\b(rmdir|rd)\s+/s\b",
+        r"\bdel\s+(/[a-z]\s+)*/s\b",
+        r"\bmkfs(\.\w+)?\b",
+        r"\bdd\s+[^\n]*\bof=/dev/",
+        r"\bformat\s+[a-z]:",
+        r"\b(diskpart|shred|wipefs)\b",
+        r"\bFormat-Volume\b|\bClear-Disk\b",
+    ],
+}
+
+#: Commands that would disable AgentGuard itself (self-protection, A6).
+DEFAULT_SELF_PROTECT_COMMANDS: list[str] = [
+    r"\b(pkill|killall)\b[^\n]*\b(agentguard|python)",
+    r"\btaskkill\b[^\n]*\b(agentguard|python)",
+    r"\bStop-Process\b[^\n]*\b(agentguard|python)",
+    r"\bschtasks\b[^\n]*/(delete|end|change)\b[^\n]*agentguard",
+    r"\bsystemctl\s+--user\s+(stop|disable|mask|kill)\s+agentguard",
+    r"\blaunchctl\s+(unload|remove|bootout)\b[^\n]*agentguard",
+    r"\bagentguard(\.cli)?\s+(uninstall-hooks|unlock)\b",
+    r"\bdisableAllHooks\b",
+]
+
+#: File locations that are AgentGuard's own configuration (self-protection, A6).
+#: Globs matched against a forward-slash, lower-cased absolute path. The
+#: AgentGuard home directory and the Claude Code user settings directory are
+#: added at runtime, since they depend on the environment.
+DEFAULT_SELF_PROTECT_PATHS: list[str] = [
+    "*/agentguard.policy.yaml",
+    "*/.claude/settings.json",
+    "*/.claude/settings.local.json",
+    "*/agentguard-daemon.cmd",
+    "*/systemd/user/agentguard.service",
+    "*/launchagents/com.agentguard.gateway.plist",
+]
+
+
+@dataclass
+class HooksConfig:
+    """`hooks:` - Claude Code hook integration (readiness phase, Phase A)."""
+
+    enabled: bool = True
+    # MCP servers whose traffic already goes through the AgentGuard gateway. The
+    # gateway is the gate for those calls; the hook only bridges taint for them,
+    # so the same call is never counted twice. Matched against the server name in
+    # `mcp__<server>__<tool>` and the payload's `mcp_server.name`.
+    gateway_servers: list[str] = field(default_factory=lambda: ["agentguard"])
+    # Hosts a Bash network command may reach without joining the exfiltration
+    # tier. Merged with `egress.allow_hosts`.
+    allow_hosts: list[str] = field(default_factory=lambda: ["localhost", "127.0.0.1", "::1"])
+    bash: dict[str, list[str]] = field(
+        default_factory=lambda: {k: list(v) for k, v in DEFAULT_HOOK_BASH.items()})
+    self_protection: bool = True
+    self_protect_commands: list[str] = field(
+        default_factory=lambda: list(DEFAULT_SELF_PROTECT_COMMANDS))
+    self_protect_paths: list[str] = field(
+        default_factory=lambda: list(DEFAULT_SELF_PROTECT_PATHS))
+    # Results of these Claude Code tools are UNTRUSTED taint sources. MCP tools
+    # are classified by their inner name against `taint.untrusted_tools`.
+    untrusted_tools: list[str] = field(default_factory=lambda: ["WebFetch", "WebSearch"])
+
+
+def _hooks_from_dict(data: dict[str, Any]) -> HooksConfig:
+    import re as _re
+
+    h = HooksConfig()
+    h.enabled = bool(data.get("enabled", h.enabled))
+    if data.get("gateway_servers") is not None:
+        h.gateway_servers = _as_list(data.get("gateway_servers"))
+    if data.get("allow_hosts") is not None:
+        h.allow_hosts = _as_list(data.get("allow_hosts"))
+    for key, patterns in (data.get("bash") or {}).items():
+        if key not in DEFAULT_HOOK_BASH:
+            raise ValueError(f"hooks.bash: unknown pattern list {key!r} "
+                             f"(expected one of {sorted(DEFAULT_HOOK_BASH)})")
+        h.bash[key] = _as_list(patterns)
+    sp = data.get("self_protection")
+    if isinstance(sp, dict):
+        h.self_protection = bool(sp.get("enabled", True))
+        if sp.get("commands") is not None:
+            h.self_protect_commands = _as_list(sp.get("commands"))
+        if sp.get("paths") is not None:
+            h.self_protect_paths = _as_list(sp.get("paths"))
+    elif sp is not None:
+        h.self_protection = bool(sp)
+    if data.get("untrusted_tools") is not None:
+        h.untrusted_tools = _as_list(data.get("untrusted_tools"))
+    # Fail at load time, not on the first tool call.
+    for pattern in [*(p for ps in h.bash.values() for p in ps), *h.self_protect_commands]:
+        try:
+            _re.compile(pattern)
+        except _re.error as exc:
+            raise ValueError(f"hooks: invalid regular expression {pattern!r}: {exc}") from exc
+    return h
+
+
 @dataclass
 class RoleRule:
     """Least-privilege rule set for one agent role."""
@@ -233,6 +354,7 @@ class Policy:
     scope: ScopeConfig = field(default_factory=ScopeConfig)
     alignment: AlignmentConfig = field(default_factory=AlignmentConfig)
     financial: FinancialConfig = field(default_factory=FinancialConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
     source_path: Path | None = None
 
     # --- tool-level rules (checked before scoring) -------------------------
@@ -396,6 +518,9 @@ def from_dict(data: dict[str, Any]) -> Policy:
         f.cap_currency = str(cap["currency"]).upper() if cap.get("currency") else None
     elif cap is not None:
         f.session_cap = float(cap)
+
+    if data.get("hooks"):
+        p.hooks = _hooks_from_dict(data["hooks"])
     return p
 
 

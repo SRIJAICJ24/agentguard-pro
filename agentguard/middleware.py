@@ -186,6 +186,13 @@ class AgentGuardMiddleware(Middleware):
         session_id = self._session_id(context)
         taint = self.taints.for_session(session_id)
 
+        # Claude Code hook bridge (set by the daemon): if a hook saw this exact
+        # call a moment ago, fold that Claude Code session's taint into ours, so
+        # a WebFetch result can't be laundered through an MCP egress tool.
+        bridge = getattr(self, "hook_bridge", None)
+        if bridge is not None:
+            bridge.merge_into(tool, arguments, taint)
+
         self.stats.calls += 1
 
         # --- 1. kill switch / locks: absolute, checked first --------------

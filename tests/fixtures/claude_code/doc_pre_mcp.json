@@ -1,0 +1,23 @@
+{
+  "source": "docs: code.claude.com/docs/en/hooks (PreToolUse input)",
+  "payload": {
+    "session_id": "doc-session-1",
+    "transcript_path": "/home/user/.claude/projects/p/doc-session-1.jsonl",
+    "cwd": "/home/user/my-project",
+    "permission_mode": "default",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "mcp__memory__create_entities",
+    "tool_input": {
+      "entities": [
+        {
+          "name": "x"
+        }
+      ]
+    },
+    "tool_use_id": "toolu_doc_mcp",
+    "mcp_server": {
+      "name": "memory",
+      "source": "user"
+    }
+  }
+}

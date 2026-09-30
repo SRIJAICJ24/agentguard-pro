@@ -12,6 +12,26 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "examples"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_claude_settings(monkeypatch):
+    """No test may read or write the real ~/.claude.
+
+    `doctor` and `install-hooks` resolve Claude Code's user settings from
+    CLAUDE_CONFIG_DIR (Claude Code's own override) before falling back to the home
+    directory, so pointing it at an empty temp dir isolates every test from
+    whatever hooks are installed on the machine running the suite.
+    """
+    import shutil
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="agentguard-claude-")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", directory)
+    try:
+        yield Path(directory)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 @pytest.fixture
 def db_path():
     """An isolated SQLite file per test.

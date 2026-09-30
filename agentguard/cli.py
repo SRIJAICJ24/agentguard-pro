@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from agentguard import __version__
-from agentguard.policy import load as load_policy
+
+
+def load_policy(*args: Any, **kwargs: Any) -> Any:
+    """Imported lazily: `agentguard hook` runs once per Claude Code tool call and
+    must load only the standard library, and the policy module pulls in PyYAML."""
+    from agentguard.policy import load
+
+    return load(*args, **kwargs)
 
 # --- small terminal helpers ------------------------------------------------
 _COLORS = {"ALLOW": "\033[32m", "REVIEW": "\033[33m", "BLOCK": "\033[31m",
@@ -340,9 +347,12 @@ def cmd_proxy(args: argparse.Namespace) -> int:
     from agentguard.gateway import run_gateway
 
     try:
-        upstream = resolve_upstream(args.upstream)
+        upstream = resolve_upstream(args.upstream) if args.upstream else None
     except (OSError, ValueError) as exc:
         print(f"proxy: cannot use --upstream {args.upstream!r}: {exc}", file=sys.stderr)
+        return 1
+    if upstream is None and args.transport == "stdio":
+        print("proxy: --transport stdio needs --upstream", file=sys.stderr)
         return 1
 
     enforcement, source = resolve_enforcement(args)
@@ -427,6 +437,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(_c("agentguard report", "bold"))
     print()
     print(report_mod.render(report, _c))
+    if getattr(args, "by_source", False):
+        print()
+        print(report_mod.render_by_source(report, _c))
     return 0
 
 
@@ -466,6 +479,92 @@ def cmd_scope(args: argparse.Namespace) -> int:
                   for sid, s in scopes.items()],
                  ["session", "tools", "goal", "set at"]))
     return 0
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Claude Code command hook: forward one event to the daemon (stdlib only)."""
+    from agentguard.hookclient import main as hook_main
+
+    return hook_main()
+
+
+def _hook_scope(args: argparse.Namespace) -> str:
+    from agentguard import hookinstall
+
+    if getattr(args, "local", False):
+        return hookinstall.SCOPE_LOCAL
+    if getattr(args, "project", False):
+        return hookinstall.SCOPE_PROJECT
+    return hookinstall.SCOPE_USER
+
+
+def cmd_install_hooks(args: argparse.Namespace) -> int:
+    from agentguard import config as cfg
+    from agentguard import hookinstall
+
+    port = args.port
+    if port is None:
+        try:
+            port = cfg.load().port
+        except cfg.ConfigError:
+            port = cfg.DEFAULT_PORT
+    kind = args.type
+    if args.fail_closed and kind == hookinstall.KIND_HTTP:
+        print("note: HTTP hooks can't fail closed (Claude Code treats an unreachable "
+              "HTTP hook as a non-blocking error); installing the command hook instead.")
+        kind = hookinstall.KIND_COMMAND
+    path = hookinstall.settings_path(_hook_scope(args))
+    try:
+        result = hookinstall.install(path, kind=kind, port=port, timeout=args.timeout)
+    except hookinstall.HookInstallError as exc:
+        print(f"install-hooks: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.path}: {result.message}")
+    if result.backup:
+        print(f"  backup: {result.backup}")
+    if result.created:
+        print("  (settings file did not exist; created it)")
+    if args.fail_closed:
+        try:
+            config = cfg.load()
+            config.hook_fail_mode = "closed"
+            cfg.save(config)
+            print("  hook_fail_mode set to closed in agentguard.json")
+        except cfg.ConfigError as exc:
+            print(f"  could not set hook_fail_mode: {exc}", file=sys.stderr)
+    target = f"http://127.0.0.1:{port}/hooks/claude-code"
+    print(f"  hooks send every PreToolUse/PostToolUse event to {target}")
+    print("  start the daemon with `agentguard proxy` (or the background service),")
+    print("  then check with `agentguard doctor`. New Claude Code sessions pick this up;")
+    print("  running sessions normally do too, via Claude Code's settings file watcher.")
+    return 0
+
+
+def cmd_uninstall_hooks(args: argparse.Namespace) -> int:
+    from agentguard import hookinstall
+
+    path = hookinstall.settings_path(_hook_scope(args))
+    try:
+        result = hookinstall.uninstall(path)
+    except hookinstall.HookInstallError as exc:
+        print(f"uninstall-hooks: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result.path}: {result.message}")
+    if result.backup:
+        print(f"  backup: {result.backup}")
+    return 0
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    from agentguard import daemonctl
+
+    if args.daemon_cmd == "status":
+        status = daemonctl.status()
+        print(daemonctl.render_status(status))
+        return 0 if status.running else 1
+    ok, message = daemonctl.stop()
+    print(message)
+    return 0 if ok else 1
 
 
 _LOCK_LIMIT_NOTE = ("note: a lock stops traffic through the gateway. It does not revoke "
@@ -567,11 +666,14 @@ def build_parser() -> argparse.ArgumentParser:
     up = ps.add_parser("unpin"); up.add_argument("tool")
     s.set_defaults(func=cmd_pins)
 
-    s = sub.add_parser("proxy", help="run the guarded proxy")
+    s = sub.add_parser("proxy",
+                       help="run the daemon: Claude Code hook endpoint, plus the MCP "
+                            "gateway when --upstream is given")
     s.add_argument("--port", type=int, default=9000)
-    s.add_argument("--upstream", required=True,
+    s.add_argument("--upstream", default=None,
                    help="upstream MCP server: a .py path, an http URL, an MCPConfig "
-                        ".json file, or inline MCPConfig JSON")
+                        ".json file, or inline MCPConfig JSON. Omit it to serve only "
+                        "the Claude Code hook endpoint")
     s.add_argument("--transport", default="http", choices=["http", "stdio"])
     s.add_argument("--enforce", action="store_true",
                    help="block/hold calls instead of only logging them")
@@ -599,6 +701,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--since", default="7d",
                    help="window to report over: 7d, 24h, 90m, 2w (default: 7d)")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--by-source", action="store_true",
+                   help="also break the numbers down by source (mcp gateway / hook)")
     s.set_defaults(func=cmd_report)
 
     s = sub.add_parser("scope", help="declare which tools a session's task needs")
@@ -630,6 +734,41 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--session", help="release one session's lock")
     s.add_argument("--by", default="human")
     s.set_defaults(func=cmd_unlock)
+
+    # --- Claude Code hooks -------------------------------------------------
+    s = sub.add_parser("hook", help="Claude Code command hook: forward stdin to the daemon")
+    s.set_defaults(func=cmd_hook)
+
+    for name, func, text in (
+        ("install-hooks", cmd_install_hooks,
+         "register AgentGuard's hooks in Claude Code settings (backup + merge)"),
+        ("uninstall-hooks", cmd_uninstall_hooks,
+         "remove AgentGuard's hooks from Claude Code settings, keeping all others"),
+    ):
+        s = sub.add_parser(name, help=text)
+        g = s.add_mutually_exclusive_group()
+        g.add_argument("--project", action="store_true",
+                       help="this project's .claude/settings.json instead of user settings")
+        g.add_argument("--local", action="store_true",
+                       help="this project's .claude/settings.local.json")
+        if name == "install-hooks":
+            s.add_argument("--type", choices=("http", "command"), default="http",
+                           help="http (default, native) or command (stdlib fallback)")
+            s.add_argument("--port", type=int, default=None,
+                           help="daemon port (default: from agentguard.json)")
+            s.add_argument("--timeout", type=int, default=None,
+                           help="seconds Claude Code waits for the hook (default 5 http, "
+                                "10 command)")
+            s.add_argument("--fail-closed", action="store_true",
+                           help="block tool calls when the daemon is unreachable "
+                                "(forces the command hook)")
+        s.set_defaults(func=func)
+
+    s = sub.add_parser("daemon", help="status or stop of the background daemon")
+    ds = s.add_subparsers(dest="daemon_cmd", required=True)
+    ds.add_parser("status")
+    ds.add_parser("stop")
+    s.set_defaults(func=cmd_daemon)
 
     s = sub.add_parser("kill", help="how to revoke access immediately")
     s.set_defaults(func=cmd_kill)

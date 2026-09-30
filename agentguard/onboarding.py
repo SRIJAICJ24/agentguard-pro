@@ -172,6 +172,10 @@ class DaemonPlan:
     content: str
     activate_cmd: list[str]
     deactivate_hint: str = ""
+    # Additional files the definition needs (Windows: a hidden-window launcher).
+    extra_files: dict[Path, str] | None = None
+    # Run after activate_cmd to start the service now rather than at next login.
+    start_cmd: list[str] | None = None
 
     @property
     def activate_display(self) -> str:
@@ -277,18 +281,38 @@ WantedBy=default.target
     if system == "windows":
         # Task Scheduler cannot take a multi-part command directly, so the task
         # runs a small launcher script that Task Scheduler can point at as one file.
-        path = cfg.agentguard_home() / "agentguard-daemon.cmd"
+        #
+        # The .cmd restarts the daemon if it exits (Task Scheduler has no
+        # restart-on-crash for logon tasks), logs to daemon.log, and stops for good
+        # when `agentguard daemon stop` leaves a daemon.stop flag. A .vbs wrapper
+        # starts it with no console window, so there's no window to close by
+        # accident - closing a terminal no longer stops AgentGuard.
+        home_dir = cfg.agentguard_home()
+        path = home_dir / "agentguard-daemon.cmd"
+        launcher = home_dir / "agentguard-daemon.vbs"
         content = (
             "@echo off\r\n"
-            "rem Launcher for the AgentGuard gateway, run by Task Scheduler.\r\n"
-            f"set AGENTGUARD_HOME={cfg.agentguard_home()}\r\n"
-            f"{command}\r\n"
+            "rem Launcher for the AgentGuard daemon, run by Task Scheduler.\r\n"
+            f"set AGENTGUARD_HOME={home_dir}\r\n"
+            'if exist "%AGENTGUARD_HOME%\\daemon.stop" del "%AGENTGUARD_HOME%\\daemon.stop"\r\n'
+            ":loop\r\n"
+            f'{command} >> "%AGENTGUARD_HOME%\\daemon.log" 2>&1\r\n'
+            'if exist "%AGENTGUARD_HOME%\\daemon.stop" goto end\r\n'
+            "timeout /t 5 /nobreak >nul\r\n"
+            "goto loop\r\n"
+            ":end\r\n"
+        )
+        vbs = (
+            "' Starts agentguard-daemon.cmd with no console window.\r\n"
+            'CreateObject("WScript.Shell").Run """' + str(path) + '""", 0, False\r\n'
         )
         return DaemonPlan(
             "windows", path, content,
             ["schtasks", "/Create", "/TN", WINDOWS_TASK_NAME,
-             "/TR", str(path), "/SC", "ONLOGON", "/F"],
-            f"schtasks /Delete /TN {WINDOWS_TASK_NAME} /F",
+             "/TR", f'wscript.exe "{launcher}"', "/SC", "ONLOGON", "/F"],
+            f"agentguard daemon stop && schtasks /Delete /TN {WINDOWS_TASK_NAME} /F",
+            extra_files={launcher: vbs},
+            start_cmd=["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME],
         )
 
     raise RuntimeError(
@@ -305,14 +329,21 @@ def install_daemon(config: Config, *, system: str | None = None,
     plan.path.write_text(plan.content, encoding="utf-8")
     if plan.platform == "windows":
         os.chmod(plan.path, 0o755)
+    for extra_path, extra_content in (plan.extra_files or {}).items():
+        extra_path.parent.mkdir(parents=True, exist_ok=True)
+        extra_path.write_text(extra_content, encoding="utf-8")
 
     if activate:
-        try:
-            subprocess.run(plan.activate_cmd, check=True, capture_output=True, text=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            detail = getattr(exc, "stderr", "") or str(exc)
-            print(f"  could not activate automatically: {detail.strip()[:200]}")
-            print(f"  run this yourself: {plan.activate_display}")
+        for step in (plan.activate_cmd, plan.start_cmd):
+            if not step:
+                continue
+            try:
+                subprocess.run(step, check=True, capture_output=True, text=True)
+            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+                detail = getattr(exc, "stderr", "") or str(exc)
+                print(f"  could not run {' '.join(step[:3])}...: {detail.strip()[:200]}")
+                print(f"  run this yourself: {' '.join(_quote(p) for p in step)}")
+                break
     return plan
 
 
@@ -389,14 +420,17 @@ def onboard(*, input_fn: InputFn = input, non_interactive: bool = False,
         "observe only - nothing will be blocked yet"
     print(f"\n  mode: {mode_note}")
     print("\nNext steps:")
-    print(f"  1. agentguard doctor")
-    print(f"  2. claude mcp add --transport http agentguard "
-          f"http://localhost:{config.port}/mcp")
-    print(f"  3. agentguard audit --last 20      # see what it would have done")
+    print("  1. agentguard install-hooks          # see Claude Code's own tools")
+    print("  2. agentguard doctor")
+    if config.upstream:
+        print(f"  3. claude mcp add --transport http agentguard "
+              f"http://localhost:{config.port}/mcp")
+    print("  -  agentguard audit --last 20      # see what it would have done")
     return config
 
 
-SETTING_CHOICES = ("port", "mode", "dashboard", "dashboard_port", "upstream")
+SETTING_CHOICES = ("port", "mode", "dashboard", "dashboard_port", "upstream",
+                   "hook_fail_mode", "hook_timeout")
 
 
 def configure(setting: str | None = None, value: str | None = None, *,
@@ -436,6 +470,18 @@ def configure(setting: str | None = None, value: str | None = None, *,
         config.upstream = value if value is not None else ask(
             "Upstream MCP server", config.upstream or "", input_fn=input_fn
         ) or None
+    elif setting == "hook_fail_mode":
+        config.hook_fail_mode = (value or ask(
+            "When the daemon is unreachable, Claude Code's command hook should fail",
+            config.hook_fail_mode, input_fn=input_fn, choices=("open", "closed"),
+        )).lower()
+    elif setting == "hook_timeout":
+        raw = value if value is not None else ask(
+            "Command-hook timeout in seconds", str(config.hook_timeout), input_fn=input_fn)
+        try:
+            config.hook_timeout = float(raw)
+        except ValueError as exc:
+            raise cfg.ConfigError(f"hook_timeout must be a number, got {raw!r}") from exc
     else:   # port / dashboard_port
         if value is not None:
             try:

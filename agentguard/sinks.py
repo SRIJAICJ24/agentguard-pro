@@ -65,7 +65,15 @@ class SinkClassifier:
         return self.policy.sink_tier(tool)
 
     def assess(self, tool: str, arguments: Any, taint: TaintMap) -> SinkAssessment:
-        tier = self.tier(tool)
+        return self.assess_tier(self.tier(tool), arguments, taint)
+
+    def assess_tier(self, tier: str, arguments: Any, taint: TaintMap) -> SinkAssessment:
+        """The same assessment for an explicitly chosen tier.
+
+        Claude Code's built-in tools don't have MCP-style names to glob on (a Bash
+        command's tier depends on the command, not on the word "Bash"), so the
+        hook integration decides the tier itself and passes it here.
+        """
         overlap = taint.check_arguments(arguments)
         signals: list[Signal] = []
 

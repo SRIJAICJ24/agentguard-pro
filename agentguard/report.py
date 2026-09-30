@@ -143,6 +143,11 @@ class Report:
 
     agents: list[tuple[str, int]] = field(default_factory=list)
 
+    # Per surface: {"mcp": {...}, "hook": {...}} - calls, verdict counts, top
+    # signals, and false-positive candidates (hook asks cleared at Claude Code's
+    # prompt count for the hook surface).
+    by_source: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     # --- derived ----------------------------------------------------------
     def _pct(self, n: int) -> float:
         return (n / self.total_calls * 100) if self.total_calls else 0.0
@@ -206,6 +211,7 @@ class Report:
             "overrule_rate_pct": round(self.overrule_rate, 2),
             "enough_data": self.enough_data,
             "agents": [{"agent": a, "calls": n} for a, n in self.agents],
+            "by_source": self.by_source,
         }
 
 
@@ -324,7 +330,77 @@ def build(since: str | timedelta = DEFAULT_SINCE,
         else:
             report.fp_candidates.append(candidate)
 
+    report.by_source = _by_source(conn, start_iso, report)
     return report
+
+
+#: Review-queue kinds that come from the Claude Code hook surface.
+HOOK_REVIEW_KINDS = ("hook_ask",)
+
+
+def _by_source(conn: Any, start_iso: str, report: Report) -> dict[str, dict[str, Any]]:
+    """Verdicts, top signals and FP candidates per surface (mcp gateway / hook)."""
+    out: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT source, verdict, COUNT(*) AS n FROM audit "
+        "WHERE stage = ? AND ts >= ? GROUP BY source, verdict",
+        (CALL_STAGE, start_iso),
+    ):
+        bucket = out.setdefault(row["source"] or "mcp", {
+            "calls": 0, "allow": 0, "review": 0, "block": 0, "signals": {},
+            "fp_candidates": 0,
+        })
+        n = int(row["n"])
+        bucket["calls"] += n
+        key = str(row["verdict"]).lower()
+        if key in ("allow", "review", "block"):
+            bucket[key] += n
+    for row in conn.execute(
+        "SELECT source, signals FROM audit WHERE stage = ? AND ts >= ? AND signals IS NOT NULL",
+        (CALL_STAGE, start_iso),
+    ):
+        bucket = out.get(row["source"] or "mcp")
+        if bucket is None:
+            continue
+        try:
+            names = {s.get("name") for s in json.loads(row["signals"] or "[]")
+                     if isinstance(s, dict)}
+        except (ValueError, TypeError):
+            continue
+        for name in names:
+            if name:
+                bucket["signals"][name] = bucket["signals"].get(name, 0) + 1
+    for c in report.fp_candidates:
+        src = "hook" if c.kind in HOOK_REVIEW_KINDS else "mcp"
+        out.setdefault(src, {"calls": 0, "allow": 0, "review": 0, "block": 0,
+                             "signals": {}, "fp_candidates": 0})["fp_candidates"] += 1
+    for bucket in out.values():
+        bucket["top_signals"] = sorted(bucket.pop("signals").items(),
+                                       key=lambda kv: (-kv[1], kv[0]))[:10]
+    return out
+
+
+def render_by_source(report: Report, colorize: Any = None) -> str:
+    def paint(text: str, key: str) -> str:
+        return colorize(text, key) if colorize else text
+
+    lines = [paint("  BY SOURCE", "bold"),
+             "  (mcp = through the MCP gateway, hook = Claude Code's own tools)"]
+    if not report.by_source:
+        lines.append("    no gated calls in this window")
+        return "\n".join(lines)
+    for source in sorted(report.by_source):
+        b = report.by_source[source]
+        calls = b["calls"] or 1
+        lines.append("")
+        lines.append(f"  {paint(source, 'bold')}: {b['calls']} calls - "
+                     f"ALLOW {b['allow']} ({b['allow'] / calls:.0%}), "
+                     f"REVIEW {b['review']} ({b['review'] / calls:.0%}), "
+                     f"BLOCK {b['block']} ({b['block'] / calls:.0%}); "
+                     f"FP candidates {b['fp_candidates']}")
+        for name, count in b["top_signals"][:6]:
+            lines.append(f"      {name}  {count}")
+    return "\n".join(lines)
 
 
 def render(report: Report, colorize: Any = None) -> str:

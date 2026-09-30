@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS audit (
     signals     TEXT,
     detail      TEXT,
     prev_hash   TEXT    NOT NULL,
-    entry_hash  TEXT    NOT NULL
+    entry_hash  TEXT    NOT NULL,
+    source      TEXT    NOT NULL DEFAULT 'mcp',
+    hash_v      INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS tool_pins (
@@ -133,10 +135,39 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(p), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    migrate(conn)
     conn.commit()
     cache[key] = conn
     _LOCAL.conns = cache
     return conn
+
+
+#: Columns added after the first release, with the SQL that adds them to an
+#: existing database. `CREATE TABLE IF NOT EXISTS` never alters a table that
+#: already exists, so databases created before a column was introduced get it
+#: here.
+_AUDIT_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    # Where the decision came from: the MCP gateway or a Claude Code hook. Every
+    # row written before hooks existed came from the gateway, so 'mcp' is the
+    # true value for them, not a guess.
+    ("source", "ALTER TABLE audit ADD COLUMN source TEXT NOT NULL DEFAULT 'mcp'"),
+    # Hash-chain format version. Version 1 rows were hashed without `source`, so
+    # they keep verifying under the version-1 field set; new rows are version 2
+    # and cover `source` too (see audit.py).
+    ("hash_v", "ALTER TABLE audit ADD COLUMN hash_v INTEGER NOT NULL DEFAULT 1"),
+)
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Bring an existing database up to the current schema. Idempotent."""
+    have = {row[1] for row in conn.execute("PRAGMA table_info(audit)")}
+    added: list[str] = []
+    for column, sql in _AUDIT_MIGRATIONS:
+        if column not in have:
+            conn.execute(sql)
+            added.append(column)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_source ON audit(source)")
+    return added
 
 
 def reset(path: str | Path | None = None) -> None:

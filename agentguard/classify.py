@@ -245,8 +245,12 @@ class DataClassifier:
             return out
 
         leaves = flatten(arguments)
+        # A file named by path is an *attachment* only when the call can carry it
+        # off the machine. On a propagation-only call (a file write) the path is
+        # the destination, and reporting it as unscanned was a false positive.
+        egress = TIER_EXFILTRATION in sink_tiers
         for where, value in leaves:
-            if _is_attachment_key(where) and _PATHISH.search(value.strip()):
+            if egress and _is_attachment_key(where) and _PATHISH.search(value.strip()):
                 out.signals.append(Signal(
                     "dlp:unscanned_attachment", 0.0,
                     f"`{where}` passes a file by path ({value[:80]}); the gateway does "

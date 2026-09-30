@@ -229,6 +229,56 @@ def check_dependencies() -> CheckResult:
                        f"fastmcp {fastmcp.__version__}, detect-secrets present")
 
 
+def check_hooks(port: int) -> CheckResult:
+    """Claude Code hooks registered, and the daemon they point at answering.
+
+    Installed-but-unreachable is a FAIL rather than a warning: Claude Code treats an
+    unreachable hook as a non-blocking error, so the agent keeps working and
+    nothing is checked - the one state where AgentGuard looks on but isn't.
+    """
+    from agentguard import hookinstall
+    from agentguard.daemonctl import probe
+
+    scopes = ((hookinstall.SCOPE_USER, hookinstall.settings_path(hookinstall.SCOPE_USER)),
+              (hookinstall.SCOPE_PROJECT, hookinstall.settings_path(hookinstall.SCOPE_PROJECT)),
+              (hookinstall.SCOPE_LOCAL, hookinstall.settings_path(hookinstall.SCOPE_LOCAL)))
+    found = [(scope, path, hookinstall.installed(path)) for scope, path in scopes]
+    found = [(scope, path, entries) for scope, path, entries in found if entries]
+    if not found:
+        return CheckResult(
+            "claude code hooks", STATUS_WARN,
+            "not installed - Claude Code's built-in tools (Bash, Read, Write, WebFetch, "
+            "...) are not seen", "run `agentguard install-hooks`",
+        )
+    where = ", ".join(f"{scope} ({path})" for scope, path, _ in found)
+    ports = {int(e["url"].split(":")[2].split("/")[0])
+             for _s, _p, entries in found for e in entries if e.get("url")}
+    if ports and ports != {port}:
+        return CheckResult(
+            "claude code hooks", STATUS_FAIL,
+            f"hooks point at port(s) {sorted(ports)} but the daemon is configured for {port}",
+            "re-run `agentguard install-hooks` so the hook URL matches the port",
+        )
+    health = probe(port)
+    if health is None:
+        return CheckResult(
+            "claude code hooks", STATUS_FAIL,
+            f"installed in {where}, but nothing answers on "
+            f"http://127.0.0.1:{port}/hooks/health - hooks fail open, so nothing is "
+            f"being checked",
+            "start the daemon (`agentguard proxy`, or the background service) and "
+            "re-run doctor",
+        )
+    if any(hookinstall.hooks_disabled(path) for _s, path in scopes):
+        return CheckResult(
+            "claude code hooks", STATUS_WARN,
+            f"installed in {where}, but a settings file sets disableAllHooks",
+            "remove disableAllHooks, or AgentGuard's hooks never run",
+        )
+    return CheckResult("claude code hooks", STATUS_PASS,
+                       f"installed in {where}; daemon answering ({health.get('mode')} mode)")
+
+
 # --- runner ----------------------------------------------------------------
 def run(policy_path: str | Path | None = None) -> DoctorReport:
     """Run every check. Never raises - problems come back as FAIL results."""
@@ -247,6 +297,7 @@ def run(policy_path: str | Path | None = None) -> DoctorReport:
     results.append(check_policy(policy_path or (config.policy_file if config else None)))
     results.append(check_database())
     results.append(check_audit_chain())
+    results.append(check_hooks(config.port if config is not None else cfg.DEFAULT_PORT))
     return DoctorReport(results)
 
 
