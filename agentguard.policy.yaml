@@ -1,0 +1,135 @@
+# AgentGuard policy
+#
+# Enforcement is OFF by default: every decision is still computed and written to
+# the audit log, but nothing is actually blocked. Run in this mode first, read
+# `agentguard audit --last 50`, confirm the false-positive rate is acceptable on
+# your own traffic, then flip enforcement to true.
+enforcement: false
+
+thresholds:
+  allow_below: 0.25    # score < this            -> ALLOW
+  block_above: 0.75    # score > this            -> BLOCK, in between -> REVIEW
+
+tools:
+  # An explicit deny always wins, before any score is computed.
+  deny:
+    - "*.delete_all"
+    - "system.exec"
+  allow: []            # empty = allow anything not explicitly denied
+
+# Least privilege per agent identity. A research agent and a coding agent get
+# genuinely different permissions.
+roles:
+  researcher:
+    allow: ["web.*", "filesystem.read", "memory.*"]
+    deny: ["filesystem.write", "*delete*", "email.send"]
+  coder:
+    allow: ["filesystem.*", "git.*", "memory.*", "web.search"]
+    deny: ["email.send", "*.delete_all"]
+  readonly:
+    # A non-empty allow list is already deny-by-default: anything unlisted is
+    # blocked. Do not add `deny: ["*"]` here - deny is evaluated first and always
+    # wins, so a catch-all deny would cancel the allow list entirely.
+    allow: ["*.read", "*.search", "*.list"]
+    deny: []
+
+paths:
+  # Checked with glob matching, independent of the secrets engine - a different
+  # signal deserves its own list.
+  deny:
+    - "**/.ssh/**"
+    - "**/.aws/**"
+    - "**/.env"
+    - "**/.env.*"
+    - "**/credentials/**"
+    - "**/id_rsa*"
+    - "**/.netrc"
+    - "**/.kube/config"
+  # Reads from these are treated as TRUSTED input for taint purposes.
+  trusted_read:
+    - "./**"
+    - "docs/**"
+    - "src/**"
+
+# Which tools return content that must be treated as untrusted.
+taint:
+  untrusted_tools:
+    - "web.*"
+    - "*search*"
+    - "*fetch*"
+    - "*browse*"
+    - "email.read*"
+    - "*inbox*"
+    - "rag.*"
+  on_exfiltration: REVIEW      # or BLOCK
+
+# Sink tiers. Anything unmatched is `ordinary` (logged only).
+sinks:
+  replace_defaults: false      # true = ignore built-in globs, use only these
+  exfiltration:
+    - "email.send"
+    - "web.post"
+    - "*webhook*"
+    - "*upload*"
+  persistence:
+    - "memory.save"
+    - "*memory_save*"
+    - "*vector*"
+    - "rag.index*"
+  # Stage 7 tiers are *additional*: a call keeps its tier above and can also be in
+  # these (email.send is exfiltration AND propagation; the stricter verdict wins).
+  # Built-in defaults cover file writes, git commits, PR/issue comments, document
+  # edits, chat posts and email; entries here are added to them.
+  propagation: []
+  financial: []        # built-ins: *payment*, *purchase*, *checkout*, *refund*, ...
+
+# --- Stage 7 detectors -------------------------------------------------------
+# Each one computes and logs by default and only stops a call when `enforcement`
+# is true. `enabled: false` turns one off entirely. Watch their signal names in
+# `agentguard report --since 7d` before turning enforcement on.
+
+# 7A: self-replicating injection - untrusted text with AI-addressed instructions
+# copied into a propagation sink -> REVIEW (signal propagation:replication).
+propagation:
+  enabled: true
+
+# 7B: volume-aware DLP on exfiltration/propagation sinks.
+classification:
+  enabled: true
+  thresholds:
+    confidential: 10   # email+phone count at/above which the payload is CONFIDENTIAL
+    pii: 50            # ... and PII. Any card/PAN/Aadhaar number is PII outright.
+  max_label:           # most sensitive label allowed out, per sink tier
+    default: {exfiltration: CONFIDENTIAL, propagation: PII}
+    # researcher: {exfiltration: INTERNAL}
+  actions:             # what happens above the limit: log | redact | review | block
+    SECRET: block
+    PII: block
+    CONFIDENTIAL: review
+    INTERNAL: log
+
+# 7C: declared task scope. Set per session with `agentguard scope set`, or per
+# role with `roles.<role>.scope: [...]`. Out-of-scope calls -> REVIEW.
+scope:
+  enabled: true
+  reserved_tools: []   # added to the always-reserved "agentguard*" namespace
+
+# 7C: optional model-based alignment check on the deep path. Off by default;
+# only a loopback endpoint is accepted unless allow_remote is true.
+alignment:
+  auditor: none        # none | openai_compatible
+  # endpoint: http://127.0.0.1:11434/v1
+  # model: llama3.1
+
+# 7D: every financial call is held for REVIEW. Optional per-session cap.
+financial:
+  enabled: true
+  # session_cap: {amount: 200, currency: USD}
+
+quarantine:
+  ttl_hours:
+    default: 24       # web-sourced content expires after a day
+    reviewed: 0       # 0 = indefinite but permanently flagged
+
+egress:
+  allow_hosts: []     # empty = every destination counts as unknown

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentguard"
+version = "0.2.0"
+description = "Local-first runtime security gateway for MCP-based AI agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.0",
+    "detect-secrets>=1.5",
+    "pyyaml>=6.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+agentguard = "agentguard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentguard*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
