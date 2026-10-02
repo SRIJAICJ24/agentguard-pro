@@ -147,7 +147,27 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  awaiting review : {s['pending_reviews']}")
     print(f"  quarantined     : {s['quarantined']}")
     print(f"  agents seen     : {s['agents']}")
+
+    from agentguard.report import activity
+
+    act = activity()
+    print(_c("  last event", "bold") + "      : " + (", ".join(
+        f"{source} {_ago(info['age_hours'])} ago" for source, info in
+        sorted(act["last_event"].items())) or "none yet"))
+    print("  last 7 days     : " + "  ".join(
+        f"{day[5:]}:{count}" for day, count in act["per_day"]))
+    if any(count == 0 for _day, count in act["per_day"][:-1]):
+        print(_c("                    a day with 0 events may be an outage - hooks fail "
+                 "open, so nothing breaks visibly when the daemon is down", "REVIEW"))
     return 0
+
+
+def _ago(hours: float) -> str:
+    if hours < 1:
+        return f"{int(hours * 60)}m"
+    if hours < 48:
+        return f"{hours:.1f}h"
+    return f"{hours / 24:.1f}d"
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -285,6 +305,7 @@ def cmd_onboard(args: argparse.Namespace) -> int:
             non_interactive=args.non_interactive,
             install_daemon_flag=args.install_daemon,
             activate=args.activate,
+            policy_dir=Path(args.policy_dir) if args.policy_dir else None,
         )
     except cfg.ConfigError as exc:
         print(f"onboarding failed: {exc}", file=sys.stderr)
@@ -426,7 +447,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     from agentguard import report as report_mod
 
     try:
-        report = report_mod.build(args.since)
+        report = report_mod.build(args.since, include_dev=getattr(args, "include_dev", False))
     except ValueError as exc:
         print(f"report failed: {exc}", file=sys.stderr)
         return 1
@@ -437,12 +458,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(_c("agentguard false-positive review", "bold"))
         print(f"  window: last {report.window}. Labels are stored separately from the "
               f"audit log, which is never changed.\n")
-        session = labels.review(report.since.isoformat())
+        if report.excluded_dev:
+            print(f"  ({report.excluded_dev} call(s) from dev workspaces "
+                  f"[{', '.join(report.dev_workspaces_excluded)}] left out; "
+                  f"--include-dev to label them too)")
+            print()
+        session = labels.review(report.since.isoformat(),
+                                exclude_workspaces=report.dev_workspaces_excluded)
         done = sum(session.labeled.values())
         print(f"\n  labeled {done} (tp {session.labeled['tp']}, fp {session.labeled['fp']}, "
               f"unsure {session.labeled['unsure']}), skipped {session.skipped}"
               + (" - stopped early" if session.quit_early else ""))
-        report = report_mod.build(args.since)      # pick up the new labels
+        report = report_mod.build(args.since,      # pick up the new labels
+                                  include_dev=getattr(args, "include_dev", False))
         print()
         print(labels.render_precision(report.precision, _c))
         return 0
@@ -742,6 +770,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write an anonymized CSV or JSON of the window (by extension)")
     s.add_argument("--format", choices=("csv", "json"), default=None,
                    help="export format, overriding the file extension")
+    s.add_argument("--include-dev", action="store_true",
+                   help="also count hook traffic from the policy's dev_workspaces")
     s.set_defaults(func=cmd_report)
 
     s = sub.add_parser("scope", help="declare which tools a session's task needs")
@@ -820,6 +850,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write a background-service definition for this OS")
     s.add_argument("--activate", action="store_true",
                    help="with --install-daemon, also enable the service now")
+    s.add_argument("--policy-dir", default=None,
+                   help="folder holding the live agentguard.policy.yaml (kept if it exists, "
+                        "starter policy written if not); its path is recorded so the "
+                        "daemon always loads that file. Default: the current folder")
     s.set_defaults(func=cmd_onboard)
 
     s = sub.add_parser("doctor", help="check the install for config and port problems")

@@ -35,7 +35,7 @@ from agentguard.db import connect
 from agentguard.labels import labels_for, row_mode, signal_names
 from agentguard.scanner import redact_text
 
-FIELDS = ("id", "ts", "source", "tool", "verdict", "score", "signals",
+FIELDS = ("id", "ts", "source", "workspace", "tool", "verdict", "score", "signals",
           "detector_version", "policy_version", "mode", "label")
 
 _HOME_PATTERNS = (
@@ -75,11 +75,15 @@ def scrub(text: Any, names: list[str] | None = None) -> Any:
     return out
 
 
-def rows(since_iso: str, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+def rows(since_iso: str, db_path: str | Path | None = None, *,
+         exclude_workspaces: Any = ()) -> list[dict[str, Any]]:
+    from agentguard.labels import workspace_clause
+
     conn = connect(db_path)
+    ws_sql, ws_args = workspace_clause(exclude_workspaces)
     raw = [dict(r) for r in conn.execute(
-        "SELECT * FROM audit WHERE stage = 'TOOL_PREPARE' AND ts >= ? ORDER BY id ASC",
-        (since_iso,))]
+        "SELECT * FROM audit WHERE stage = 'TOOL_PREPARE' AND ts >= ?" + ws_sql
+        + " ORDER BY id ASC", (since_iso, *ws_args))]
     marks = labels_for([r["id"] for r in raw], db_path)
     names = usernames()
     out = []
@@ -88,6 +92,7 @@ def rows(since_iso: str, db_path: str | Path | None = None) -> list[dict[str, An
             "id": r["id"],
             "ts": r["ts"],
             "source": r.get("source") or "mcp",
+            "workspace": r.get("workspace") or "",
             "tool": r.get("tool"),
             "verdict": r.get("verdict"),
             "score": r.get("score"),
@@ -107,8 +112,11 @@ def header_line(report: Any) -> str:
     warn = " (MIXED VERSIONS - compare periods separately)" if report.mixed_versions else ""
     return (f"agentguard export - window last {report.window} "
             f"({report.since:%Y-%m-%d %H:%M} to {report.until:%Y-%m-%d %H:%M} UTC); "
-            f"versions: {mix}{warn}; arguments removed; home paths, usernames and "
-            f"secrets redacted")
+            f"versions: {mix}{warn}; "
+            + (f"excluded {report.excluded_dev} dev-workspace call(s) "
+               f"[{', '.join(report.dev_workspaces_excluded)}]; "
+               if getattr(report, "excluded_dev", 0) else "")
+            + "arguments removed; home paths, usernames and secrets redacted")
 
 
 def export(path: str | Path, report: Any, db_path: str | Path | None = None,
@@ -118,7 +126,8 @@ def export(path: str | Path, report: Any, db_path: str | Path | None = None,
     fmt = (fmt or target.suffix.lstrip(".") or "csv").lower()
     if fmt not in ("csv", "json"):
         raise ValueError(f"export format must be csv or json, got {fmt!r}")
-    data = rows(report.since.isoformat(), db_path)
+    data = rows(report.since.isoformat(), db_path,
+                exclude_workspaces=getattr(report, "dev_workspaces_excluded", ()))
     header = scrub(header_line(report))
     target.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "json":

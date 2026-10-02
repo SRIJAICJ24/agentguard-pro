@@ -26,11 +26,11 @@ from typing import Any
 
 #: Bump on any change to detection logic (see module docstring). Format:
 #: YYYY.MM.N - the date of the change plus a counter.
-DETECTOR_VERSION = "2026.10.2"
+DETECTOR_VERSION = "2026.10.3"
 
 #: The fingerprint of the detection code DETECTOR_VERSION describes. When the
 #: fingerprint test fails, bump DETECTOR_VERSION and paste the new value here.
-DETECTOR_FINGERPRINT = "a2e9d31a3dd7"
+DETECTOR_FINGERPRINT = "4314997db1d9"
 
 #: Modules whose code decides verdicts. Comments, docstrings and formatting
 #: don't count (the fingerprint is taken over the syntax tree); code does.

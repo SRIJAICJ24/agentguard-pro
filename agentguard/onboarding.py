@@ -201,6 +201,14 @@ def _console_parts() -> list[str]:
     ("C:\\Program Files\\..."), and splitting a joined string back apart would
     corrupt it. Callers that need a single line quote the parts themselves.
     """
+    # The agentguard installed next to the running interpreter wins over anything
+    # else on PATH: run from a dedicated venv, the service must use that venv's
+    # (frozen) install, never a different checkout that happens to be on PATH.
+    here = Path(sys.executable).parent
+    for name in ("agentguard.exe", "agentguard"):
+        candidate = here / name
+        if candidate.is_file():
+            return [str(candidate)]
     found = shutil.which("agentguard")
     return [found] if found else [sys.executable, "-m", "agentguard.cli"]
 
@@ -456,7 +464,7 @@ def onboard(*, input_fn: InputFn = input, non_interactive: bool = False,
 
 
 SETTING_CHOICES = ("port", "mode", "dashboard", "dashboard_port", "upstream",
-                   "hook_fail_mode", "hook_timeout")
+                   "hook_fail_mode", "hook_timeout", "hook_silence_hours")
 
 
 def configure(setting: str | None = None, value: str | None = None, *,
@@ -501,13 +509,15 @@ def configure(setting: str | None = None, value: str | None = None, *,
             "When the daemon is unreachable, Claude Code's command hook should fail",
             config.hook_fail_mode, input_fn=input_fn, choices=("open", "closed"),
         )).lower()
-    elif setting == "hook_timeout":
+    elif setting in ("hook_timeout", "hook_silence_hours"):
+        label = {"hook_timeout": "Command-hook timeout in seconds",
+                 "hook_silence_hours": "Warn when no hook event for this many hours"}[setting]
         raw = value if value is not None else ask(
-            "Command-hook timeout in seconds", str(config.hook_timeout), input_fn=input_fn)
+            label, str(getattr(config, setting)), input_fn=input_fn)
         try:
-            config.hook_timeout = float(raw)
+            setattr(config, setting, float(raw))
         except ValueError as exc:
-            raise cfg.ConfigError(f"hook_timeout must be a number, got {raw!r}") from exc
+            raise cfg.ConfigError(f"{setting} must be a number, got {raw!r}") from exc
     else:   # port / dashboard_port
         if value is not None:
             try:

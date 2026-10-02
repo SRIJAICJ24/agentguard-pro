@@ -55,6 +55,41 @@ _ENTROPY_SETTINGS = [
     {"name": "HexHighEntropyString", "limit": 3.0},
 ]
 
+# --- tier 1b: current key formats detect-secrets doesn't cover --------------
+# Each prefix was checked against the provider's own documentation (F1, see
+# docs/week-log.md for sources). Bodies are matched loosely, by character class
+# and a minimum length, because providers don't publish body lengths; the left
+# boundary keeps `ask-admin-...` from reading as `sk-admin-...`, and the minimum
+# length keeps a bare prefix mentioned in prose from matching.
+_KEY_LEFT = r"(?<![A-Za-z0-9_\-.])"
+MODERN_KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (label, re.compile(pattern)) for label, pattern in (
+        # OpenAI: sk-admin- (Admin API reference); sk-proj-, sk-svcacct-
+        ("OpenAI API Key", _KEY_LEFT + r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}"),
+        # Anthropic: sk-ant-api03-... (API keys), sk-ant-admin... (Admin API keys)
+        ("Anthropic API Key", _KEY_LEFT + r"sk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_\-]{20,}"),
+        # Google Cloud API keys: AIza + 35 (docs example is 39 characters)
+        ("Google API Key", _KEY_LEFT + r"AIza[0-9A-Za-z_\-]{35}(?![0-9A-Za-z_\-])"),
+        # GitHub fine-grained personal access tokens (classic ghp_ etc. are
+        # already covered by detect-secrets)
+        ("GitHub Fine-grained Token", _KEY_LEFT + r"github_pat_[A-Za-z0-9_]{22,}"),
+        # Slack app-level (xapp-), rotating app-level (xoxe.xapp-), workflow (xwfp-);
+        # xoxb-/xoxp- are already covered by detect-secrets
+        ("Slack App Token", _KEY_LEFT + r"(?:xoxe\.)?(?:xapp|xwfp)-[A-Za-z0-9\-]{20,}"),
+        # Stripe: live and sandbox secret/restricted keys, organisation keys.
+        # Publishable pk_ keys are documented as safe to expose and not flagged.
+        ("Stripe API Key", _KEY_LEFT + r"(?:(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{20,}"
+                                       r"|sk_org_[0-9A-Za-z_]{20,})"),
+    )
+)
+
+
+def scan_modern_keys(text: str, where: str = "") -> list["Finding"]:
+    return [Finding("secret", label, where, _redact(line))
+            for line in (text.splitlines() or [text])
+            for label, rx in MODERN_KEY_PATTERNS if rx.search(line)]
+
+
 CRED_CONTEXT = re.compile(
     r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|credential|auth|"
     r"bearer|access[_-]?key|private[_-]?key|client[_-]?secret|session[_-]?id)\b"
@@ -229,6 +264,7 @@ def scan_secrets(text: str, where: str = "") -> list[Finding]:
         for line in lines:
             for s in ds_scan.scan_line(line):
                 findings.append(Finding("secret", s.type, where, _redact(line)))
+    findings.extend(scan_modern_keys(text, where))
 
     if CRED_CONTEXT.search(text):
         with transient_settings({"plugins_used": _ENTROPY_SETTINGS}):
@@ -330,6 +366,15 @@ def redact_text(text: str) -> str:
                 for match in _full_matches(s.type, line):
                     if len(match) >= 6:
                         replacements[match] = f"<redacted:{s.type}>"
+
+    # Current key formats (MODERN_KEY_PATTERNS) - always the whole token.
+    for line in lines:
+        for label, rx in MODERN_KEY_PATTERNS:
+            for m in rx.finditer(line):
+                end = m.end()
+                while end < len(line) and line[end] in _TOKEN_CHARS:
+                    end += 1
+                replacements[line[m.start():end]] = f"<redacted:{label}>"
 
     if CRED_CONTEXT.search(text):
         with transient_settings({"plugins_used": _ENTROPY_SETTINGS}):

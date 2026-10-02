@@ -283,7 +283,7 @@ def test_migration_keeps_old_rows_verifying(db_path):
     rid = record(db_path)
     assert audit.verify_chain(db_path) == (True, None)
     new = audit.last(1, db_path)[0]
-    assert new["hash_v"] == audit.HASH_VERSION == 3
+    assert new["hash_v"] == audit.HASH_VERSION
     from agentguard.versions import DETECTOR_VERSION
     assert new["detector_version"] == DETECTOR_VERSION and new["mode"] == "observe"
 

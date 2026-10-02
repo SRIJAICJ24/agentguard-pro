@@ -65,6 +65,9 @@ class Config:
     # that is Claude Code's behaviour, not a setting.
     hook_fail_mode: str = "open"
     hook_timeout: float = 2.0
+    # F3: `doctor` warns when hooks are installed but no hook event has arrived
+    # for this many hours - fail-open makes an outage otherwise invisible.
+    hook_silence_hours: float = 24.0
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -94,6 +97,10 @@ class Config:
         if self.hook_fail_mode not in ("open", "closed"):
             problems.append(f"hook_fail_mode must be 'open' or 'closed', "
                             f"got {self.hook_fail_mode!r}")
+        if not isinstance(self.hook_silence_hours, (int, float)) \
+                or isinstance(self.hook_silence_hours, bool) or float(self.hook_silence_hours) <= 0:
+            problems.append(f"hook_silence_hours must be a positive number of hours, "
+                            f"got {self.hook_silence_hours!r}")
         if not isinstance(self.hook_timeout, (int, float)) or isinstance(self.hook_timeout, bool) \
                 or not (0 < float(self.hook_timeout) <= 30):
             problems.append(f"hook_timeout must be a number of seconds in (0, 30], "

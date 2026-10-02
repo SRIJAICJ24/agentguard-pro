@@ -78,6 +78,7 @@ from agentguard.scanner import (
 from agentguard.scope import ScopeStore
 from agentguard.sinks import SinkClassifier
 from agentguard.taint import UNTRUSTED, TaintMap, TaintRegistry
+from agentguard.workspace import workspace_label
 
 EVENT_PRE = "PreToolUse"
 EVENT_POST = "PostToolUse"
@@ -156,37 +157,90 @@ def _posix_lower(path: str | Path) -> str:
 
 
 # --- self-protection: shared by the hooks and the MCP gateway ---------------
+# F5: it guards the LIVE setup only - the policy the daemon loaded (and the one
+# recorded in agentguard.json), the live AGENTGUARD_HOME, the Claude Code user
+# settings, and settings files that currently register AgentGuard's hooks. A
+# second copy of agentguard.policy.yaml (the repository's) is ordinary work.
+_SETTINGS_NAMES = ("settings.json", "settings.local.json")
+
+
+def _live_policy_files(policy: Policy) -> list[Path]:
+    files: list[Path] = []
+    if policy.source_path:
+        files.append(Path(policy.source_path))
+    try:
+        from agentguard import config as cfg
+
+        if cfg.exists():
+            recorded = cfg.load().policy_file
+            if recorded:
+                files.append(Path(recorded))
+    except Exception:                                   # noqa: BLE001
+        pass
+    return files
+
+
 def _protected_roots(policy: Policy) -> list[str]:
     from agentguard.config import agentguard_home
 
-    roots = [_posix_lower(agentguard_home()), _posix_lower(claude_home() / "settings.json"),
-             _posix_lower(claude_home() / "settings.local.json")]
-    if policy.source_path:
-        roots.append(_posix_lower(Path(policy.source_path).resolve()))
-    return roots
+    roots = [_posix_lower(agentguard_home())]
+    roots += [_posix_lower(claude_home() / name) for name in _SETTINGS_NAMES]
+    for path in _live_policy_files(policy):
+        roots.append(_posix_lower(path))
+        try:
+            roots.append(_posix_lower(path.resolve()))
+        except OSError:
+            pass
+    return list(dict.fromkeys(roots))
+
+
+def _command_forms(root: str) -> list[str]:
+    """A protected absolute path, plus how a command might spell it via the home
+    directory (~/..., $HOME/..., %USERPROFILE%/...)."""
+    forms = [root]
+    home = _posix_lower(Path.home())
+    if root.startswith(home + "/"):
+        rest = root[len(home):]
+        forms += ["~" + rest, "$home" + rest, "${home}" + rest, "%userprofile%" + rest]
+    return forms
+
+
+def _registers_agentguard_hooks(path: str) -> bool:
+    p = Path(path)
+    if p.name.lower() not in _SETTINGS_NAMES or p.parent.name.lower() != ".claude":
+        return False
+    from agentguard.hookinstall import installed
+
+    return bool(installed(p))
 
 
 def protected_path(policy: Policy, path: str) -> bool:
-    """Is `path` AgentGuard's own config, policy, audit data, daemon definition,
-    or a Claude Code settings file that registers its hooks?"""
+    """Is `path` part of the live AgentGuard setup (see above)?"""
     norm = _posix_lower(path)
     for root in _protected_roots(policy):
         if norm == root or norm.startswith(root + "/"):
             return True
+    if _registers_agentguard_hooks(path):
+        return True
     return any(fnmatch(norm, g.lower()) for g in policy.hooks.self_protect_paths)
 
 
+def disables_hooks(path: str, content: str) -> bool:
+    """A Claude Code settings write that switches every hook off, wherever it is."""
+    p = Path(str(path).replace("\\", "/"))
+    return (p.name.lower() in _SETTINGS_NAMES and p.parent.name.lower() == ".claude"
+            and "disableallhooks" in content.lower())
+
+
 def protected_command(policy: Policy, command: str) -> bool:
-    """Does a shell command touch those files, or stop/disable AgentGuard?"""
+    """Does a shell command touch the live setup, or stop/disable AgentGuard?"""
     if any(re.search(p, command, re.IGNORECASE) for p in policy.hooks.self_protect_commands):
         return True
     norm = command.replace("\\", "/").lower()
-    if any(root in norm for root in _protected_roots(policy)):
-        return True
-    # Commands name files relatively or via ~, so match the distinctive tail of
-    # each protected location as well as its absolute form.
+    for root in _protected_roots(policy):
+        if any(form in norm for form in _command_forms(root)):
+            return True
     markers = [g.lower().lstrip("*").lstrip("/") for g in policy.hooks.self_protect_paths]
-    markers += ["/.agentguard", "agentguard.db", "agentguard.json"]
     return any(marker and marker in norm for marker in markers)
 
 
@@ -200,12 +254,15 @@ def mcp_touches_protected(policy: Policy, tiers: list[str], arguments: Any) -> b
     any path-like argument; commands by argument name, whatever the tool.
     """
     writes = TIER_PROPAGATION in tiers or TIER_PERSISTENCE in tiers
-    for where, value in flatten(arguments):
+    leaves = flatten(arguments)
+    content = "\n".join(v for _w, v in leaves)
+    for where, value in leaves:
         key = where.rsplit(".", 1)[-1].split("[", 1)[0].lower()
         if key in _COMMAND_KEYS and protected_command(policy, value):
             return True
         if writes and ("/" in value or "\\" in value) and "\n" not in value \
-                and len(value) < 1024 and protected_path(policy, value):
+                and len(value) < 1024 and (protected_path(policy, value)
+                                           or disables_hooks(value, content)):
             return True
     return False
 
@@ -390,7 +447,10 @@ class HookEngine:
                     args[key] = tool_input[key]
             call = MappedCall(tool, tool, args, [TIER_ORDINARY, TIER_PROPAGATION])
             path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-            if path and self._protected_path(path):
+            written = "\n".join(v for _w, v in flatten({k: args[k] for k in args
+                                                         if k in WRITE_TOOLS[tool]}))
+            if path and (self._protected_path(path)
+                         or (hooks.self_protection and disables_hooks(path, written))):
                 call.self_protect = True
             return call
 
@@ -620,6 +680,7 @@ class HookEngine:
             review_id = self.queue.enqueue(
                 kind=KIND_HOOK_ASK, tool=call.tool,
                 payload={"tool_use_id": tool_use_id,
+                         "workspace": workspace_label(payload.get("cwd")),
                          "args_digest": digest_args(_clip(tool_input)),
                          "arguments": redact_arguments(_clip(tool_input)),
                          "signals": [s.to_dict() for s in decision.signals]},
@@ -653,7 +714,8 @@ class HookEngine:
                      arguments=_clip(tool_input), session_id=session,
                      agent=self._agent(payload), role=self.identity.role,
                      detail=detail, db_path=self.db_path, source=SOURCE_HOOK,
-                     policy_version=self.policy_version, mode=mode)
+                     policy_version=self.policy_version, mode=mode,
+                     workspace=workspace_label(payload.get("cwd")))
         self.events.append({"event": EVENT_PRE, "tool": call.tool,
                             "verdict": decision.verdict.value, "outcome": outcome,
                             "would": would, "signals": decision.signal_names,
@@ -729,4 +791,5 @@ class HookEngine:
             db_path=self.db_path, source=SOURCE_HOOK,
             policy_version=self.policy_version,
             mode="enforce" if self.enforcing else "observe",
+            workspace=workspace_label(payload.get("cwd")),
         )

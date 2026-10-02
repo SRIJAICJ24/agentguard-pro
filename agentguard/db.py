@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS audit (
     hash_v      INTEGER NOT NULL DEFAULT 1,
     policy_version   TEXT,
     detector_version TEXT,
-    mode        TEXT
+    mode        TEXT,
+    workspace   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tool_pins (
@@ -174,6 +175,9 @@ _AUDIT_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("policy_version", "ALTER TABLE audit ADD COLUMN policy_version TEXT"),
     ("detector_version", "ALTER TABLE audit ADD COLUMN detector_version TEXT"),
     ("mode", "ALTER TABLE audit ADD COLUMN mode TEXT"),
+    # F2: short workspace label for hook rows (never a full path). NULL for
+    # gateway rows and for rows written before it existed.
+    ("workspace", "ALTER TABLE audit ADD COLUMN workspace TEXT"),
 )
 
 

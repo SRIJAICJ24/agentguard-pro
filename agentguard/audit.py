@@ -32,12 +32,14 @@ HASHED_FIELDS = ("ts", "session_id", "agent", "role", "stage", "tool",
 #: `source` column existed; version 2 also covers `source`. Each row stores its
 #: version, so old rows keep verifying unchanged after the migration, and a row
 #: whose version is flipped to dodge coverage no longer matches its stored hash.
-HASH_VERSION = 3
+HASH_VERSION = 4
 _FIELDS_BY_VERSION: dict[int, tuple[str, ...]] = {
     1: HASHED_FIELDS,
     2: HASHED_FIELDS + ("source",),
     # Phase E: which detector/policy made the decision, and in which mode.
     3: HASHED_FIELDS + ("source", "policy_version", "detector_version", "mode"),
+    # F2: the workspace label of a hook row.
+    4: HASHED_FIELDS + ("source", "policy_version", "detector_version", "mode", "workspace"),
 }
 
 SOURCE_MCP = "mcp"
@@ -111,6 +113,7 @@ def record(
     policy_version: str | None = None,
     detector_version: str | None = None,
     mode: str | None = None,
+    workspace: str | None = None,
 ) -> int:
     """Append one decision. Returns the new row id.
 
@@ -145,6 +148,7 @@ def record(
         "policy_version": policy_version,
         "detector_version": detector_version,
         "mode": mode,
+        "workspace": workspace,
     }
     entry_hash = _entry_hash(prev_hash, entry, HASH_VERSION)
 
@@ -152,10 +156,10 @@ def record(
         """INSERT INTO audit (ts, session_id, agent, role, stage, tool, args_digest,
                               score, verdict, reason, signals, detail, prev_hash,
                               entry_hash, source, hash_v, policy_version,
-                              detector_version, mode)
+                              detector_version, mode, workspace)
            VALUES (:ts,:session_id,:agent,:role,:stage,:tool,:args_digest,
                    :score,:verdict,:reason,:signals,:detail,:prev_hash,:entry_hash,
-                   :source,:hash_v,:policy_version,:detector_version,:mode)""",
+                   :source,:hash_v,:policy_version,:detector_version,:mode,:workspace)""",
         {**entry, "prev_hash": prev_hash, "entry_hash": entry_hash,
          "hash_v": HASH_VERSION},
     )

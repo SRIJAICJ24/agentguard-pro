@@ -11,7 +11,7 @@ Nothing leaves your machine.
 behaviour monitoring, the red-team simulator, the distribution layer, the validation
 tooling, and the September 2026 threat update (worm detection, volume-aware DLP,
 declared task scope, a financial tier with a global lock, and a
-[standards mapping](docs/standards-mapping.md)). 357 tests pass. Every Stage 7 detector
+[standards mapping](docs/standards-mapping.md)). 427 tests pass. Every Stage 7 detector
 ships observe-only like everything else. See
 [What's built so far](#whats-built-so-far) for the honest breakdown.
 
@@ -229,12 +229,32 @@ them separately as calls that were *actually* stopped.
 error, and that can't be changed). If you need fail-closed, install the stdlib-only command
 hook: `agentguard install-hooks --fail-closed`.
 
-**Self-protection.** Writes, edits and shell commands that touch AgentGuard's config, policy
-file, audit database, the Claude Code settings files that register the hooks, or that stop
-the daemon go to REVIEW, and are denied in enforce mode. **This raises the bar; it does not
-stop a determined process running as the same user.** Anything with your file permissions
-can edit those files or kill the daemon by a route the patterns don't recognise, or while
-the daemon isn't running.
+**Self-protection guards the live setup.** That means writes, edits and shell commands that
+touch any of these, or that stop the daemon:
+
+- the policy file the daemon actually loads (and the one recorded in `agentguard.json`)
+- the live `AGENTGUARD_HOME` (config and audit database)
+- your Claude Code user settings, plus any settings file that currently registers
+  AgentGuard's hooks
+- any settings write that sets `disableAllHooks`
+
+They go to REVIEW and are denied in enforce mode, or always when `self_protection` is hard-enforced.
+A *different* copy of `agentguard.policy.yaml`, such as the one in this repository where
+AgentGuard is developed, is ordinary work and isn't blocked. **This raises the bar; it does
+not stop a determined process running as the same user.** Anything with your file
+permissions can edit those files or kill the daemon by a route the patterns don't
+recognise, or while the daemon isn't running.
+
+**Dev workspaces.** Each hook row records a short workspace label: the folder name only,
+never the full path, and a home folder becomes `<home>`. Hook traffic from folders listed in
+`dev_workspaces` (default: this repository's folder) is left out of `report`, `--fp-review`
+and precision, and the count left out is printed. `--include-dev` counts it.
+
+**Gaps.** Because hooks fail open, a stopped daemon looks exactly like a quiet day.
+`agentguard status` shows the time since the last event per source and events per day for
+the last 7 days. `report` names every complete day in its window with no events. `doctor`
+warns when hooks are installed but no hook event has arrived for `hook_silence_hours`
+(default 24, set in `agentguard.json`).
 
 Details, the verified hook schema, and what differed from expectations:
 [docs/claude-code-hooks-notes.md](docs/claude-code-hooks-notes.md).
@@ -664,7 +684,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-357 tests, one file per stage. The ones that matter most are the four attack
+427 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -711,6 +731,7 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 - [x] **Readiness A** — Claude Code hooks (HTTP endpoint + stdlib command fallback), tool mapping for Bash/PowerShell/Read/Write/Edit/WebFetch/WebSearch/MCP, gateway↔hook taint bridge, observe/enforce mapping, self-protection, `install-hooks`/`uninstall-hooks`, `source` column with a chain-preserving migration, `report --by-source`, hooks-only daemon that restarts on Windows
 - [x] **Readiness E** — `report --fp-review` labeler (labels kept outside the audit chain), precision by source and signal with n and an n < 20 warning, detector/policy/mode versions on every audit row with a version-mix warning, anonymized `report --export`
 - [x] **Hard enforcement** — `hard_enforce:` rules (credential files, secret exfiltration, self-protection) that block even in observe mode, via hooks and the MCP gateway, reported separately
+- [x] **Week 1 prep (F1-F5)** — modern key formats with whole-token redaction, workspace labels with dev-workspace exclusion, gap detection in `status`/`report`/`doctor`, live-setup-only self-protection, frozen non-editable install (see [docs/week-log.md](docs/week-log.md))
 - [ ] **The validation week itself** — not yet run. This is the gate on everything below. Stage 7 detectors and the hooks should be measured in the same week.
 - [ ] Packaged install (`pipx install agentguard` once published to PyPI)
 
@@ -776,9 +797,18 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
   interruption, made after the fact. Labelling a sample rather than every decision gives a
   precision figure, but no recall: decisions the gateway *allowed* are never shown, so
   misses aren't counted.
-- **Not every key format is detected.** The newer OpenAI `sk-proj-…` key format, for
-  example, isn't recognised by the detect-secrets version in use. Formats it doesn't
-  recognise are neither flagged nor redacted.
+- **Key formats are a list, not a guarantee.** On top of detect-secrets, AgentGuard
+  recognises these formats, each checked against the provider's documentation (sources in
+  `docs/week-log.md`):
+  - OpenAI `sk-proj-`, `sk-svcacct-` and `sk-admin-` keys
+  - Anthropic `sk-ant-api…` and `sk-ant-admin…` keys
+  - Google `AIza…` keys
+  - GitHub `github_pat_` tokens
+  - Slack `xapp-`, `xoxe.xapp-` and `xwfp-` tokens
+  - Stripe `sk_`/`rk_` live and test keys, and `sk_org_` keys
+
+  A format not on that list (Google's newer `AQ.` keys, for example) is neither flagged
+  nor redacted.
 - **Export redaction errs toward removing too much.** A string containing a word like
   "secret" or "token" switches on entropy-based redaction for the whole string, so a little
   harmless text can disappear along with the secret.
@@ -824,13 +854,14 @@ agentguard/
   versions.py    DETECTOR_VERSION, detection-code fingerprint, policy hash    (E)
   export.py      anonymized CSV/JSON export                                    (E)
   hardrules.py   rules that block even in observe mode (`hard_enforce`)
+  workspace.py   short workspace labels for hook rows (F2)
   cli.py         command line interface
 docs/BUILD_PROMPTS.md       the staged build specification
 docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
 docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           357 tests, one file per stage
+tests/           427 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").

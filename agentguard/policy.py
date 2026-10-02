@@ -237,15 +237,17 @@ DEFAULT_SELF_PROTECT_COMMANDS: list[str] = [
     r"\bdisableAllHooks\b",
 ]
 
-#: File locations that are AgentGuard's own configuration (self-protection, A6).
-#: Globs matched against a forward-slash, lower-cased absolute path. The
-#: AgentGuard home directory and the Claude Code user settings directory are
-#: added at runtime, since they depend on the environment.
+#: Extra file locations treated as AgentGuard's own (self-protection, A6). Globs
+#: matched against a forward-slash, lower-cased absolute path.
+#:
+#: Self-protection guards the LIVE setup (F5), resolved at runtime: the policy
+#: file the daemon loaded and the one recorded in agentguard.json, the live
+#: AGENTGUARD_HOME, the Claude Code user settings, and any settings file that
+#: currently registers AgentGuard's hooks. It deliberately does NOT match every
+#: file named agentguard.policy.yaml - the repository's copy, where AgentGuard is
+#: developed, is ordinary work. Only the service definitions, which live outside
+#: AGENTGUARD_HOME, are listed here.
 DEFAULT_SELF_PROTECT_PATHS: list[str] = [
-    "*/agentguard.policy.yaml",
-    "*/.claude/settings.json",
-    "*/.claude/settings.local.json",
-    "*/agentguard-daemon.cmd",
     "*/systemd/user/agentguard.service",
     "*/launchagents/com.agentguard.gateway.plist",
 ]
@@ -365,6 +367,10 @@ class Policy:
     hooks: HooksConfig = field(default_factory=HooksConfig)
     # Rules from HARD_RULES that block even when `enforcement` is false.
     hard_enforce: list[str] = field(default_factory=list)
+    # F2: workspace labels (folder names) whose hook traffic is development of
+    # AgentGuard itself - left out of report, --fp-review and precision unless
+    # --include-dev is given. Defaults to this repository's folder name.
+    dev_workspaces: list[str] = field(default_factory=lambda: ["agentgaurd"])
     source_path: Path | None = None
 
     # --- tool-level rules (checked before scoring) -------------------------
@@ -539,6 +545,9 @@ def from_dict(data: dict[str, Any]) -> Policy:
             raise ValueError(f"hard_enforce: unknown rule(s) {unknown}; "
                              f"choose from {list(HARD_RULES)}")
         p.hard_enforce = list(dict.fromkeys(rules))
+
+    if "dev_workspaces" in data:
+        p.dev_workspaces = _as_list(data.get("dev_workspaces"))
     return p
 
 

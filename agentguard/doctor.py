@@ -279,6 +279,48 @@ def check_hooks(port: int) -> CheckResult:
                        f"installed in {where}; daemon answering ({health.get('mode')} mode)")
 
 
+def check_hook_activity(silence_hours: float | None = None) -> CheckResult:
+    """F3: hooks installed but silent for too long.
+
+    Claude Code treats an unreachable hook as a non-blocking error, so a stopped
+    daemon looks exactly like a quiet day. If no hook event has been logged for
+    `hook_silence_hours` (agentguard.json, default 24) while hooks are installed,
+    something is probably off.
+    """
+    from agentguard import hookinstall
+    from agentguard.report import activity
+
+    name = "hook activity"
+    installed = any(hookinstall.installed(hookinstall.settings_path(scope))
+                    for scope in (hookinstall.SCOPE_USER, hookinstall.SCOPE_PROJECT,
+                                  hookinstall.SCOPE_LOCAL))
+    if not installed:
+        return CheckResult(name, STATUS_PASS, "hooks not installed - nothing to watch")
+    if silence_hours is None:
+        try:
+            silence_hours = float(cfg.load().hook_silence_hours)
+        except cfg.ConfigError:
+            silence_hours = 24.0
+    try:
+        last = activity()["last_event"].get("hook")
+    except Exception as exc:                                   # noqa: BLE001
+        return CheckResult(name, STATUS_WARN, f"could not read hook activity: {exc}")
+    if last is None:
+        return CheckResult(name, STATUS_WARN,
+                           "hooks are installed but no hook event has been logged yet",
+                           "run any Claude Code tool call, then `agentguard audit --last 5`")
+    age = last["age_hours"]
+    if age > silence_hours:
+        return CheckResult(
+            name, STATUS_WARN,
+            f"last hook event was {age:.0f} h ago (warning threshold {silence_hours:g} h) - "
+            f"if Claude Code has been in use, the daemon was probably down",
+            "check `agentguard daemon status`; set hook_silence_hours in agentguard.json "
+            "to change the threshold",
+        )
+    return CheckResult(name, STATUS_PASS, f"last hook event {age:.1f} h ago")
+
+
 # --- runner ----------------------------------------------------------------
 def run(policy_path: str | Path | None = None) -> DoctorReport:
     """Run every check. Never raises - problems come back as FAIL results."""
@@ -298,6 +340,7 @@ def run(policy_path: str | Path | None = None) -> DoctorReport:
     results.append(check_database())
     results.append(check_audit_chain())
     results.append(check_hooks(config.port if config is not None else cfg.DEFAULT_PORT))
+    results.append(check_hook_activity(config.hook_silence_hours if config is not None else None))
     return DoctorReport(results)
 
 

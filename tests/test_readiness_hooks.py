@@ -336,15 +336,15 @@ ATTACKS = [
     ("Bash", {"command": "cat ~/.ssh/id_rsa"}),
     ("Bash", {"command": "rm -rf /"}),
     ("Read", {"file_path": "/home/me/.aws/credentials"}),
-    ("Write", {"file_path": "/home/me/.claude/settings.json", "content": "{}"}),
+    ("Write", {"file_path": "<USER_SETTINGS>", "content": "{}"}),   # live (F5)
     ("Bash", {"command": "export T=ghp_16C7e42F292c6912E7710c838347Ae178B4a"}),
 ]
 
 
 @pytest.mark.parametrize("tool,tool_input", ATTACKS)
 def test_observe_mode_never_returns_deny(db_path, tool, tool_input):
-    engine = _engine(db_path, enforce=False)
-    assert engine.handle(pre(tool, tool_input)) == {}
+    engine = live_engine(_engine(db_path, enforce=False))
+    assert engine.handle(pre(tool, live(tool_input))) == {}
     assert last(engine)["verdict"] in ("REVIEW", "BLOCK"), "still detected and logged"
     assert last(engine)["outcome"] == "no decision"
 
@@ -404,25 +404,53 @@ def test_approval_is_found_after_a_daemon_restart(db_path):
 # A6: self-protection
 # =========================================================================
 @pytest.mark.parametrize("tool,tool_input", [
-    ("Write", {"file_path": "/home/me/project/.claude/settings.json", "content": "{}"}),
-    ("Edit", {"file_path": r"D:\work\agentguard.policy.yaml", "old_string": "true",
-              "new_string": "false"}),
+    # F5: self-protection guards the LIVE setup. A project settings file that
+    # switches every hook off is tampering wherever it is; the policy and home are
+    # the live ones (placeholders resolved by `live()` below).
+    ("Write", {"file_path": "/home/me/project/.claude/settings.json",
+               "content": '{"disableAllHooks": true}'}),
+    ("Edit", {"file_path": "<LIVE_POLICY>", "old_string": "true", "new_string": "false"}),
     ("Bash", {"command": "taskkill /F /IM python.exe"}),
     ("Bash", {"command": "pkill -f agentguard"}),
-    ("Bash", {"command": "sqlite3 ~/.agentguard/agentguard.db 'delete from audit'"}),
+    ("Bash", {"command": "sqlite3 <LIVE_HOME>/agentguard.db 'delete from audit'"}),
     ("Bash", {"command": "schtasks /Delete /TN AgentGuard /F"}),
     ("PowerShell", {"command": "Stop-Process -Name python -Force"}),
     ("Bash", {"command": "agentguard uninstall-hooks"}),
     ("Bash", {"command": "echo '{\"disableAllHooks\": true}' > .claude/settings.local.json"}),
 ])
 def test_self_protection_fires(db_path, tool, tool_input):
-    engine = _engine(db_path, enforce=False)
-    engine.handle(pre(tool, tool_input))
+    engine = live_engine(_engine(db_path, enforce=False))
+    engine.handle(pre(tool, live(tool_input)))
     ev = last(engine)
     assert "selfprotect:tamper" in ev["signals"] and ev["verdict"] in ("REVIEW", "BLOCK"), ev
 
-    enforcing = _engine(db_path, enforce=True)
-    assert decision(enforcing.handle(pre(tool, tool_input))) == "deny"
+    enforcing = live_engine(_engine(db_path, enforce=True))
+    assert decision(enforcing.handle(pre(tool, live(tool_input)))) == "deny"
+
+
+LIVE_POLICY = "D:/live-week/agentguard.policy.yaml"
+
+
+def live_engine(engine):
+    """Mark LIVE_POLICY as the policy file this engine was loaded from."""
+    engine.policy.source_path = Path(LIVE_POLICY)
+    return engine
+
+
+def live(tool_input):
+    """Resolve <LIVE_POLICY>, <LIVE_HOME> and <USER_SETTINGS> to the live paths."""
+    from agentguard.config import agentguard_home
+    from agentguard.hooks import claude_home
+
+    subs = {"<LIVE_POLICY>": LIVE_POLICY, "<LIVE_HOME>": agentguard_home().as_posix(),
+            "<USER_SETTINGS>": str(claude_home() / "settings.json")}
+    out = {}
+    for key, value in tool_input.items():
+        if isinstance(value, str):
+            for marker, real in subs.items():
+                value = value.replace(marker, real)
+        out[key] = value
+    return out
 
 
 def test_self_protection_covers_the_real_home_and_claude_dirs(db_path, monkeypatch, tmp_path_factory=None):

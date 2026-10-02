@@ -77,19 +77,32 @@ def labels_for(ids: list[int], db_path: str | Path | None = None) -> dict[int, s
     return out
 
 
+def workspace_clause(exclude: Any = ()) -> tuple[str, tuple[Any, ...]]:
+    """SQL fragment leaving out rows from the given workspace labels (F2).
+    Rows without a workspace (gateway rows, older rows) are always kept."""
+    names = [w for w in (exclude or []) if w]
+    if not names:
+        return "", ()
+    marks = ",".join("?" * len(names))
+    return f" AND (workspace IS NULL OR workspace NOT IN ({marks}))", tuple(names)
+
+
 def interruptions(since_iso: str | None = None,
-                  db_path: str | Path | None = None) -> list[dict[str, Any]]:
+                  db_path: str | Path | None = None, *,
+                  exclude_workspaces: Any = ()) -> list[dict[str, Any]]:
     """Every gated REVIEW/BLOCK decision in the window, oldest first."""
     conn = connect(db_path)
+    ws_sql, ws_args = workspace_clause(exclude_workspaces)
     sql = ("SELECT * FROM audit WHERE stage = ? AND verdict IN ('REVIEW','BLOCK')"
-           + (" AND ts >= ?" if since_iso else "") + " ORDER BY id ASC")
-    args: tuple[Any, ...] = (CALL_STAGE, since_iso) if since_iso else (CALL_STAGE,)
+           + (" AND ts >= ?" if since_iso else "") + ws_sql + " ORDER BY id ASC")
+    args: tuple[Any, ...] = ((CALL_STAGE, since_iso) if since_iso else (CALL_STAGE,)) + ws_args
     return [dict(r) for r in conn.execute(sql, args)]
 
 
 def unlabeled(since_iso: str | None = None,
-              db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    rows = interruptions(since_iso, db_path)
+              db_path: str | Path | None = None, *,
+              exclude_workspaces: Any = ()) -> list[dict[str, Any]]:
+    rows = interruptions(since_iso, db_path, exclude_workspaces=exclude_workspaces)
     done = labels_for([r["id"] for r in rows], db_path)
     return [r for r in rows if r["id"] not in done]
 
@@ -165,7 +178,8 @@ class ReviewSession:
 
 def review(since_iso: str | None = None, *, db_path: str | Path | None = None,
            input_fn: Callable[[str], str] | None = None,
-           out: Callable[[str], None] | None = None, by: str = "human") -> ReviewSession:
+           out: Callable[[str], None] | None = None, by: str = "human",
+           exclude_workspaces: Any = ()) -> ReviewSession:
     """Interactive labeler. Already-labeled rows never come back; skipped ones do.
 
     `input_fn` / `out` default to the builtins looked up at call time (not bound at
@@ -175,7 +189,7 @@ def review(since_iso: str | None = None, *, db_path: str | Path | None = None,
 
     input_fn = input_fn or (lambda prompt: builtins.input(prompt))
     out = out or (lambda text: builtins.print(text))
-    todo = unlabeled(since_iso, db_path)
+    todo = unlabeled(since_iso, db_path, exclude_workspaces=exclude_workspaces)
     session = ReviewSession()
     if not todo:
         out("  nothing to label - every REVIEW/BLOCK decision in this window is labeled")
@@ -276,8 +290,9 @@ def _add(split: Split, label: str) -> None:
 
 
 def precision(since_iso: str | None = None,
-              db_path: str | Path | None = None) -> Precision:
-    rows = interruptions(since_iso, db_path)
+              db_path: str | Path | None = None, *,
+              exclude_workspaces: Any = ()) -> Precision:
+    rows = interruptions(since_iso, db_path, exclude_workspaces=exclude_workspaces)
     marks = labels_for([r["id"] for r in rows], db_path)
     result = Precision(interruptions=len(rows), labeled=len(marks))
     for row in rows:

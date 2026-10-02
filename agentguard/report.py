@@ -157,6 +157,11 @@ class Report:
     # (rule, count) for calls refused by a hard-enforced rule - these were
     # actually stopped, even in observe mode, so they're reported apart.
     hard_enforced: list[tuple[str, int]] = field(default_factory=list)
+    # F2: gated calls left out because they came from a dev workspace.
+    excluded_dev: int = 0
+    dev_workspaces_excluded: list[str] = field(default_factory=list)
+    # F3: complete UTC days in the window with no audit events at all.
+    zero_event_days: list[str] = field(default_factory=list)
 
     @property
     def mixed_versions(self) -> bool:
@@ -231,14 +236,37 @@ class Report:
             "mixed_versions": self.mixed_versions,
             "precision": self.precision.to_dict() if self.precision is not None else None,
             "hard_enforced": [{"rule": r, "count": n} for r, n in self.hard_enforced],
+            "excluded_dev": self.excluded_dev,
+            "dev_workspaces_excluded": self.dev_workspaces_excluded,
+            "zero_event_days": self.zero_event_days,
         }
+
+
+def _dev_workspaces(explicit: list[str] | None) -> list[str]:
+    """The policy's dev_workspaces, unless given explicitly."""
+    if explicit is not None:
+        return list(explicit)
+    try:
+        from agentguard.policy import load
+
+        return list(load().dev_workspaces)
+    except Exception:                                   # noqa: BLE001
+        return []
 
 
 def build(since: str | timedelta = DEFAULT_SINCE,
           db_path: str | Path | None = None,
           now: datetime | None = None,
-          incident_window: timedelta = INCIDENT_WINDOW) -> Report:
-    """Read the audit log and review queue, and compute the report."""
+          incident_window: timedelta = INCIDENT_WINDOW,
+          *, include_dev: bool = False,
+          dev_workspaces: list[str] | None = None) -> Report:
+    """Read the audit log and review queue, and compute the report.
+
+    Hook traffic from `dev_workspaces` (F2) is left out unless `include_dev`;
+    how many gated calls that removed is reported as `excluded_dev`.
+    """
+    from agentguard.labels import workspace_clause
+
     delta = since if isinstance(since, timedelta) else parse_duration(since)
     until = now or datetime.now(timezone.utc)
     start = until - delta
@@ -248,11 +276,21 @@ def build(since: str | timedelta = DEFAULT_SINCE,
     report = Report(since=start, until=until, window=window)
     start_iso = start.isoformat()
 
+    dev = [] if include_dev else _dev_workspaces(dev_workspaces)
+    report.dev_workspaces_excluded = dev
+    ws_sql, ws_args = workspace_clause(dev)
+    if dev:
+        marks = ",".join("?" * len(dev))
+        report.excluded_dev = int(conn.execute(
+            f"SELECT COUNT(*) FROM audit WHERE stage = ? AND ts >= ? "
+            f"AND workspace IN ({marks})", (CALL_STAGE, start_iso, *dev),
+        ).fetchone()[0])
+
     # --- verdict counts over gating decisions only ------------------------
     rows = conn.execute(
         "SELECT verdict, COUNT(*) AS n FROM audit "
-        "WHERE stage = ? AND ts >= ? GROUP BY verdict",
-        (CALL_STAGE, start_iso),
+        "WHERE stage = ? AND ts >= ?" + ws_sql + " GROUP BY verdict",
+        (CALL_STAGE, start_iso, *ws_args),
     ).fetchall()
     for row in rows:
         count = int(row["n"])
@@ -265,24 +303,25 @@ def build(since: str | timedelta = DEFAULT_SINCE,
             report.block += count
 
     report.taint_events = int(conn.execute(
-        "SELECT COUNT(*) FROM audit WHERE stage = ? AND ts >= ?",
-        (RESULT_STAGE, start_iso),
+        "SELECT COUNT(*) FROM audit WHERE stage = ? AND ts >= ?" + ws_sql,
+        (RESULT_STAGE, start_iso, *ws_args),
     ).fetchone()[0])
 
     report.agents = [
         (r["agent"], int(r["n"])) for r in conn.execute(
             "SELECT agent, COUNT(*) AS n FROM audit "
-            "WHERE stage = ? AND ts >= ? AND agent IS NOT NULL "
-            "GROUP BY agent ORDER BY n DESC",
-            (CALL_STAGE, start_iso),
+            "WHERE stage = ? AND ts >= ? AND agent IS NOT NULL" + ws_sql +
+            " GROUP BY agent ORDER BY n DESC",
+            (CALL_STAGE, start_iso, *ws_args),
         ).fetchall()
     ]
 
     # --- which signals actually fire --------------------------------------
     counts: dict[str, int] = {}
     for row in conn.execute(
-        "SELECT signals FROM audit WHERE stage = ? AND ts >= ? AND signals IS NOT NULL",
-        (CALL_STAGE, start_iso),
+        "SELECT signals FROM audit WHERE stage = ? AND ts >= ? AND signals IS NOT NULL"
+        + ws_sql,
+        (CALL_STAGE, start_iso, *ws_args),
     ):
         try:
             signals = json.loads(row["signals"] or "[]")
@@ -303,14 +342,21 @@ def build(since: str | timedelta = DEFAULT_SINCE,
     # Every BLOCK, indexed by session, so the follow-up check is one pass not N queries.
     blocks_by_session: dict[str, list[datetime]] = {}
     for row in conn.execute(
-        "SELECT session_id, ts FROM audit WHERE verdict = 'BLOCK' AND ts >= ?",
-        (start_iso,),
+        "SELECT session_id, ts FROM audit WHERE verdict = 'BLOCK' AND ts >= ?" + ws_sql,
+        (start_iso, *ws_args),
     ):
         parsed = _parse_ts(row["ts"])
         if row["session_id"] and parsed:
             blocks_by_session.setdefault(row["session_id"], []).append(parsed)
 
     for row in queue_rows:
+        if dev:
+            try:
+                queued_ws = json.loads(row["payload"] or "{}").get("workspace")
+            except (ValueError, TypeError, AttributeError):
+                queued_ws = None
+            if queued_ws in dev:
+                continue                       # a dev-workspace ask (F2)
         report.reviews_total += 1
         status = row["status"]
         if status == "pending":
@@ -349,8 +395,9 @@ def build(since: str | timedelta = DEFAULT_SINCE,
         else:
             report.fp_candidates.append(candidate)
 
-    report.by_source = _by_source(conn, start_iso, report)
-    report.versions = version_mix(conn, start_iso)
+    report.by_source = _by_source(conn, start_iso, report, ws_sql, ws_args)
+    report.versions = version_mix(conn, start_iso, ws_sql, ws_args)
+    report.zero_event_days = zero_event_days(conn, start, until)
     hard: dict[str, int] = {}
     for name, count in report.signal_counts:
         if name.startswith("hard_enforce:"):
@@ -359,14 +406,15 @@ def build(since: str | timedelta = DEFAULT_SINCE,
 
     from agentguard.labels import precision as label_precision
 
-    report.precision = label_precision(start_iso, db_path)
+    report.precision = label_precision(start_iso, db_path, exclude_workspaces=dev)
     return report
 
 
 UNVERSIONED = "unversioned"
 
 
-def version_mix(conn: Any, start_iso: str) -> list[tuple[str, str, int]]:
+def version_mix(conn: Any, start_iso: str, ws_sql: str = "",
+                ws_args: tuple[Any, ...] = ()) -> list[tuple[str, str, int]]:
     """(detector_version, policy_version, calls) for gated calls since start.
 
     Rows written before versions were recorded show as "unversioned": they may or
@@ -375,12 +423,55 @@ def version_mix(conn: Any, start_iso: str) -> list[tuple[str, str, int]]:
     """
     rows = conn.execute(
         "SELECT detector_version, policy_version, COUNT(*) AS n FROM audit "
-        "WHERE stage = ? AND ts >= ? GROUP BY detector_version, policy_version "
+        "WHERE stage = ? AND ts >= ?" + ws_sql + " GROUP BY detector_version, policy_version "
         "ORDER BY n DESC",
-        (CALL_STAGE, start_iso),
+        (CALL_STAGE, start_iso, *ws_args),
     ).fetchall()
     return [(r["detector_version"] or UNVERSIONED, r["policy_version"] or UNVERSIONED,
              int(r["n"])) for r in rows]
+
+
+def zero_event_days(conn: Any, start: datetime, until: datetime) -> list[str]:
+    """Complete UTC days inside [start, until] with no audit rows at all (F3).
+
+    Partial first/last days are skipped: a window starting at 18:00 would otherwise
+    report an empty "day" that was only six hours long. All sources and stages
+    count - any row at all means the daemon was alive that day.
+    """
+    first = (start + timedelta(days=1)).date()
+    last = (until - timedelta(days=1)).date()
+    if first > last:
+        return []
+    seen = {r[0] for r in conn.execute(
+        "SELECT DISTINCT substr(ts, 1, 10) FROM audit WHERE ts >= ? AND ts < ?",
+        (first.isoformat(), (last + timedelta(days=1)).isoformat()))}
+    out, day = [], first
+    while day <= last:
+        if day.isoformat() not in seen:
+            out.append(day.isoformat())
+        day += timedelta(days=1)
+    return out
+
+
+def activity(db_path: str | Path | None = None, now: datetime | None = None,
+             days: int = 7) -> dict[str, Any]:
+    """Time since the last event per source, and events per UTC day (F3)."""
+    now = now or datetime.now(timezone.utc)
+    conn = connect(db_path)
+    last_event: dict[str, dict[str, Any]] = {}
+    for row in conn.execute("SELECT source, MAX(ts) AS ts FROM audit GROUP BY source"):
+        parsed = _parse_ts(row["ts"])
+        if parsed:
+            last_event[row["source"] or "mcp"] = {
+                "ts": row["ts"], "age_hours": (now - parsed).total_seconds() / 3600}
+    start_day = (now - timedelta(days=days - 1)).date()
+    counts = {r[0]: int(r[1]) for r in conn.execute(
+        "SELECT substr(ts, 1, 10) AS d, COUNT(*) FROM audit WHERE ts >= ? GROUP BY d",
+        (start_day.isoformat(),))}
+    per_day = [((start_day + timedelta(days=i)).isoformat(),
+                counts.get((start_day + timedelta(days=i)).isoformat(), 0))
+               for i in range(days)]
+    return {"last_event": last_event, "per_day": per_day}
 
 
 def render_versions(report: Report, colorize: Any = None) -> str:
@@ -404,13 +495,14 @@ def render_versions(report: Report, colorize: Any = None) -> str:
 HOOK_REVIEW_KINDS = ("hook_ask",)
 
 
-def _by_source(conn: Any, start_iso: str, report: Report) -> dict[str, dict[str, Any]]:
+def _by_source(conn: Any, start_iso: str, report: Report, ws_sql: str = "",
+               ws_args: tuple[Any, ...] = ()) -> dict[str, dict[str, Any]]:
     """Verdicts, top signals and FP candidates per surface (mcp gateway / hook)."""
     out: dict[str, dict[str, Any]] = {}
     for row in conn.execute(
         "SELECT source, verdict, COUNT(*) AS n FROM audit "
-        "WHERE stage = ? AND ts >= ? GROUP BY source, verdict",
-        (CALL_STAGE, start_iso),
+        "WHERE stage = ? AND ts >= ?" + ws_sql + " GROUP BY source, verdict",
+        (CALL_STAGE, start_iso, *ws_args),
     ):
         bucket = out.setdefault(row["source"] or "mcp", {
             "calls": 0, "allow": 0, "review": 0, "block": 0, "signals": {},
@@ -422,8 +514,9 @@ def _by_source(conn: Any, start_iso: str, report: Report) -> dict[str, dict[str,
         if key in ("allow", "review", "block"):
             bucket[key] += n
     for row in conn.execute(
-        "SELECT source, signals FROM audit WHERE stage = ? AND ts >= ? AND signals IS NOT NULL",
-        (CALL_STAGE, start_iso),
+        "SELECT source, signals FROM audit WHERE stage = ? AND ts >= ? AND signals IS NOT NULL"
+        + ws_sql,
+        (CALL_STAGE, start_iso, *ws_args),
     ):
         bucket = out.get(row["source"] or "mcp")
         if bucket is None:
@@ -478,6 +571,15 @@ def render(report: Report, colorize: Any = None) -> str:
     lines.append(f"  window          : last {report.window} "
                  f"({report.since:%Y-%m-%d %H:%M} to {report.until:%Y-%m-%d %H:%M} UTC)")
     lines.append(f"  calls gated     : {report.total_calls}")
+    if report.excluded_dev:
+        lines.append(paint(f"  excluded {report.excluded_dev} call(s) from dev workspaces "
+                           f"[{', '.join(report.dev_workspaces_excluded)}] "
+                           f"(--include-dev to count them)", "dim"))
+    if report.zero_event_days:
+        lines.append(paint(f"  WARNING: no events on {', '.join(report.zero_event_days)}. "
+                           f"Hooks are fail-open, so an outage (daemon stopped, machine off) "
+                           f"looks the same as a quiet day - check `agentguard daemon status`.",
+                           "REVIEW"))
 
     if report.total_calls == 0:
         lines.append("")

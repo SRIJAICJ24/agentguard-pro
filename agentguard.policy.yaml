@@ -20,6 +20,12 @@ hard_enforce:
   - secret_exfiltration
   - self_protection
 
+# Workspaces (folder names) where you develop or test AgentGuard itself. Hook
+# traffic from them is left out of `report`, `--fp-review` and precision by
+# default (`--include-dev` counts it), so deliberate test attacks don't count as
+# real decisions. Only the folder name is stored, never the full path.
+dev_workspaces: ["agentgaurd"]
+
 thresholds:
   allow_below: 0.25    # score < this            -> ALLOW
   block_above: 0.75    # score > this            -> BLOCK, in between -> REVIEW
