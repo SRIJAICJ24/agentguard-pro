@@ -811,7 +811,7 @@ def test_hash_chain_verifies_after_migration(db_path):
                  arguments={"command": "ls"}, db_path=db_path, source="hook")
     assert audit.verify_chain(db_path) == (True, None), "new rows chain on the old ones"
     new = audit.last(1, db_path)[0]
-    assert new["source"] == "hook" and new["hash_v"] == 2
+    assert new["source"] == "hook" and new["hash_v"] == audit.HASH_VERSION
 
 
 def test_source_is_covered_by_the_hash_chain(db_path):

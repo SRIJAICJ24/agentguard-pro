@@ -111,6 +111,10 @@ class AgentGuardMiddleware(Middleware):
         self.sinks = SinkClassifier(self.policy)
         self.propagation = PropagationDetector(self.policy, self.ledger)
         self.classifier = DataClassifier(self.policy)
+        from agentguard.versions import policy_version
+
+        # Recorded on every audit row, so a mid-week policy edit is visible.
+        self.policy_version = policy_version(self.policy)
         self.scopes = ScopeStore(db_path, self.policy)
         self.financial = FinancialGuard(self.policy, db_path)
         self.locks = LockStore(db_path)
@@ -141,6 +145,8 @@ class AgentGuardMiddleware(Middleware):
             session_id=session_id or self.identity.session_id,
             agent=self.identity.name, role=self.identity.role,
             detail=detail, db_path=self.db_path,
+            policy_version=self.policy_version,
+            mode="enforce" if self._enforced() else "observe",
         )
         self.stats.events.append({
             "id": row_id, "stage": stage, "tool": tool,

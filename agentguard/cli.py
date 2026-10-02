@@ -431,6 +431,37 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"report failed: {exc}", file=sys.stderr)
         return 1
 
+    if getattr(args, "fp_review", False):
+        from agentguard import labels
+
+        print(_c("agentguard false-positive review", "bold"))
+        print(f"  window: last {report.window}. Labels are stored separately from the "
+              f"audit log, which is never changed.\n")
+        session = labels.review(report.since.isoformat())
+        done = sum(session.labeled.values())
+        print(f"\n  labeled {done} (tp {session.labeled['tp']}, fp {session.labeled['fp']}, "
+              f"unsure {session.labeled['unsure']}), skipped {session.skipped}"
+              + (" - stopped early" if session.quit_early else ""))
+        report = report_mod.build(args.since)      # pick up the new labels
+        print()
+        print(labels.render_precision(report.precision, _c))
+        return 0
+
+    if getattr(args, "export", None):
+        from agentguard import export as export_mod
+
+        try:
+            path, count = export_mod.export(args.export, report, fmt=args.format)
+        except (ValueError, OSError) as exc:
+            print(f"export failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"exported {count} decision(s) to {path}")
+        print("  arguments removed; home paths, usernames and secrets redacted")
+        if report.mixed_versions:
+            print(_c("  note: the window mixes detector/policy versions (see the "
+                     "first line of the file)", "REVIEW"))
+        return 0
+
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
         return 0
@@ -704,6 +735,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.add_argument("--by-source", action="store_true",
                    help="also break the numbers down by source (mcp gateway / hook)")
+    s.add_argument("--fp-review", action="store_true",
+                   help="label each unlabeled REVIEW/BLOCK decision in the window as "
+                        "tp / fp / unsure, one at a time")
+    s.add_argument("--export", metavar="FILE", default=None,
+                   help="write an anonymized CSV or JSON of the window (by extension)")
+    s.add_argument("--format", choices=("csv", "json"), default=None,
+                   help="export format, overriding the file extension")
     s.set_defaults(func=cmd_report)
 
     s = sub.add_parser("scope", help="declare which tools a session's task needs")

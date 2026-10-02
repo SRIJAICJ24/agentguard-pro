@@ -11,7 +11,7 @@ Nothing leaves your machine.
 behaviour monitoring, the red-team simulator, the distribution layer, the validation
 tooling, and the September 2026 threat update (worm detection, volume-aware DLP,
 declared task scope, a financial tier with a global lock, and a
-[standards mapping](docs/standards-mapping.md)). 292 tests pass. Every Stage 7 detector
+[standards mapping](docs/standards-mapping.md)). 320 tests pass. Every Stage 7 detector
 ships observe-only like everything else. See
 [What's built so far](#whats-built-so-far) for the honest breakdown.
 
@@ -511,6 +511,38 @@ That number decides what happens next:
 - **High** → fix the scanner before enforcing anything. Turning on blocking with a noisy
   detector is how a security tool gets uninstalled.
 
+### The weekly review: from impression to a number
+
+FP candidates only show where a human *overruled* the gateway. For a real precision figure,
+label the interruptions yourself:
+
+```bash
+python -m agentguard.cli report --since 7d --by-source      # 1. what happened
+python -m agentguard.cli report --since 7d --fp-review      # 2. label each REVIEW/BLOCK
+python -m agentguard.cli report --since 7d --by-source      # 3. precision, with its n
+python -m agentguard.cli report --since 7d --export week.csv   # 4. anonymized copy
+```
+
+- **`--fp-review`** shows each unlabeled REVIEW/BLOCK decision once: tool, source, signals,
+  and arguments with secrets already removed. In observe mode a BLOCK is shown as
+  **"would have blocked"**, because it ran. Answer `t` (real problem), `f` (false alarm),
+  `u` (unsure), `s` (skip, it comes back next time) or `q` (quit). Labels go in their own
+  table. The hash-chained audit log is never changed.
+- **Precision** = tp / (tp + fp), shown overall, by source (mcp | hook) and by signal, and
+  always with its n. Any split with **n < 20** says *"too few labels to trust"*. A decision
+  counts toward every signal it carried, so per-signal precision answers "when this fires,
+  how often is it right?"
+- **Versions.** Every audit row records the detector version, a hash of the policy, and the
+  mode. If the window mixes versions (because you edited the policy or updated AgentGuard
+  mid-week), `report` warns instead of blending them into one number. `DETECTOR_VERSION` in
+  `agentguard/versions.py` must be bumped whenever detection code changes, and a test
+  enforces it.
+- **`--export`** writes CSV or JSON with tool, source, verdict, score, signal names,
+  versions, mode, timestamps and your labels. Arguments, reasons and signal details are
+  dropped entirely. Home-directory paths become `<HOME>`, your username becomes `<USER>`,
+  and anything the scanner recognises as a secret becomes `<redacted:…>`. The first line
+  notes the window and the version mix.
+
 ---
 
 ## Everyday commands
@@ -544,6 +576,8 @@ agentguard install-hooks [--project|--local] [--type command] [--fail-closed]
 agentguard uninstall-hooks [--project|--local]
 agentguard daemon status | stop      # the background daemon
 agentguard report --since 7d --by-source   # mcp gateway vs Claude Code hooks
+agentguard report --since 7d --fp-review  # label REVIEW/BLOCK decisions tp/fp
+agentguard report --since 7d --export week.csv   # anonymized export
 ```
 
 The audit-chain timeline is genuinely readable:
@@ -615,7 +649,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-292 tests, one file per stage. The ones that matter most are the four attack
+320 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -660,6 +694,7 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 - [x] **Stage 7D** — financial tier, session cap, hash-chained payment receipts, `lock --all` / `unlock`
 - [x] **Stage 7E** — [standards mapping](docs/standards-mapping.md) with a Gaps column
 - [x] **Readiness A** — Claude Code hooks (HTTP endpoint + stdlib command fallback), tool mapping for Bash/PowerShell/Read/Write/Edit/WebFetch/WebSearch/MCP, gateway↔hook taint bridge, observe/enforce mapping, self-protection, `install-hooks`/`uninstall-hooks`, `source` column with a chain-preserving migration, `report --by-source`, hooks-only daemon that restarts on Windows
+- [x] **Readiness E** — `report --fp-review` labeler (labels kept outside the audit chain), precision by source and signal with n and an n < 20 warning, detector/policy/mode versions on every audit row with a version-mix warning, anonymized `report --export`
 - [ ] **The validation week itself** — not yet run. This is the gate on everything below. Stage 7 detectors and the hooks should be measured in the same week.
 - [ ] Packaged install (`pipx install agentguard` once published to PyPI)
 
@@ -721,6 +756,16 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
   links nothing when that's ambiguous.
 - **In observe mode a lock doesn't stop Claude Code's own tools.** Observe mode never answers
   "deny", by design. The MCP gateway still honours locks in every mode.
+- **Precision is only as good as the labels.** It measures your judgment of each
+  interruption, made after the fact. Labelling a sample rather than every decision gives a
+  precision figure, but no recall: decisions the gateway *allowed* are never shown, so
+  misses aren't counted.
+- **Not every key format is detected.** The newer OpenAI `sk-proj-…` key format, for
+  example, isn't recognised by the detect-secrets version in use. Formats it doesn't
+  recognise are neither flagged nor redacted.
+- **Export redaction errs toward removing too much.** A string containing a word like
+  "secret" or "token" switches on entropy-based redaction for the whole string, so a little
+  harmless text can disappear along with the secret.
 
 ---
 
@@ -759,13 +804,16 @@ agentguard/
   hookclient.py  `agentguard hook`: stdlib-only command hook                  (A)
   hookinstall.py install/uninstall hooks in Claude Code settings              (A)
   daemonctl.py   `agentguard daemon status|stop`                              (A)
+  labels.py      `report --fp-review` labeler + precision                      (E)
+  versions.py    DETECTOR_VERSION, detection-code fingerprint, policy hash    (E)
+  export.py      anonymized CSV/JSON export                                    (E)
   cli.py         command line interface
 docs/BUILD_PROMPTS.md       the staged build specification
 docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
 docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           292 tests, one file per stage
+tests/           320 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").

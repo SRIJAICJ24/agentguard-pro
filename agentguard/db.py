@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS audit (
     prev_hash   TEXT    NOT NULL,
     entry_hash  TEXT    NOT NULL,
     source      TEXT    NOT NULL DEFAULT 'mcp',
-    hash_v      INTEGER NOT NULL DEFAULT 1
+    hash_v      INTEGER NOT NULL DEFAULT 1,
+    policy_version   TEXT,
+    detector_version TEXT,
+    mode        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tool_pins (
@@ -100,6 +103,16 @@ CREATE TABLE IF NOT EXISTS locks (
     released_by  TEXT
 );
 
+-- Phase E: human labels for REVIEW/BLOCK decisions. Deliberately a separate
+-- table keyed by audit row id: labelling happens after the fact and must never
+-- touch the hash-chained audit log.
+CREATE TABLE IF NOT EXISTS fp_labels (
+    audit_id    INTEGER PRIMARY KEY,
+    label       TEXT NOT NULL CHECK (label IN ('tp', 'fp', 'unsure')),
+    labeled_at  TEXT NOT NULL,
+    labeled_by  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
 CREATE INDEX IF NOT EXISTS idx_locks_active ON locks(released_at, scope);
 CREATE INDEX IF NOT EXISTS idx_review_status ON review_queue(status);
@@ -155,6 +168,12 @@ _AUDIT_MIGRATIONS: tuple[tuple[str, str], ...] = (
     # they keep verifying under the version-1 field set; new rows are version 2
     # and cover `source` too (see audit.py).
     ("hash_v", "ALTER TABLE audit ADD COLUMN hash_v INTEGER NOT NULL DEFAULT 1"),
+    # Phase E: which detector and policy made the decision, and in which mode.
+    # NULL for rows written before this existed - they genuinely weren't
+    # recorded, and report shows them as "unversioned" rather than guessing.
+    ("policy_version", "ALTER TABLE audit ADD COLUMN policy_version TEXT"),
+    ("detector_version", "ALTER TABLE audit ADD COLUMN detector_version TEXT"),
+    ("mode", "ALTER TABLE audit ADD COLUMN mode TEXT"),
 )
 
 
@@ -174,6 +193,6 @@ def reset(path: str | Path | None = None) -> None:
     """Drop every row. Used by tests and `agentguard reset`."""
     conn = connect(path)
     for table in ("audit", "tool_pins", "review_queue", "quarantine", "trusted_memory",
-                  "task_scope", "locks"):
+                  "task_scope", "locks", "fp_labels"):
         conn.execute(f"DELETE FROM {table}")
     conn.commit()

@@ -323,6 +323,13 @@ def redact_text(text: str) -> str:
                 value = getattr(s, "secret_value", None)
                 if value and len(str(value)) >= 6:
                     replacements[str(value)] = f"<redacted:{s.type}>"
+                # Some detectors report only part of the secret as its value -
+                # GitHub's returns just the "ghp" prefix - so redacting the value
+                # alone left the whole token in the log. Also redact the full
+                # match of the reporting detector's own patterns.
+                for match in _full_matches(s.type, line):
+                    if len(match) >= 6:
+                        replacements[match] = f"<redacted:{s.type}>"
 
     if CRED_CONTEXT.search(text):
         with transient_settings({"plugins_used": _ENTROPY_SETTINGS}):
@@ -339,6 +346,43 @@ def redact_text(text: str) -> str:
     for value in sorted(replacements, key=len, reverse=True):
         out = out.replace(value, replacements[value])
     return out
+
+
+_DETECTOR_PATTERNS: dict[str, tuple[Any, ...]] = {}
+
+
+def _full_matches(secret_type: str, line: str) -> list[str]:
+    """Whole-match text of a detect-secrets detector's regexes in `line`.
+
+    Only used for redaction, after the detector has already reported a finding
+    on this line. Detectors without a regex denylist (keyword, entropy) are
+    covered by their reported value instead.
+    """
+    if secret_type not in _DETECTOR_PATTERNS:
+        patterns: tuple[Any, ...] = ()
+        try:
+            from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
+
+            cls = get_mapping_from_secret_type_to_class().get(secret_type)
+            if cls is not None:
+                patterns = tuple(getattr(cls(), "denylist", ()) or ())
+        except Exception:                                     # noqa: BLE001
+            patterns = ()
+        _DETECTOR_PATTERNS[secret_type] = patterns
+    out: list[str] = []
+    for rx in _DETECTOR_PATTERNS[secret_type]:
+        for m in rx.finditer(line):
+            # Some patterns match only the start of a token (a JWT's first two
+            # segments, a fixed-length Stripe prefix). Extend to the end of the
+            # contiguous token so no tail of the secret is left behind.
+            end = m.end()
+            while end < len(line) and line[end] in _TOKEN_CHARS:
+                end += 1
+            out.append(line[m.start():end])
+    return out
+
+
+_TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.+/=")
 
 
 def redact_arguments(arguments: Any) -> Any:

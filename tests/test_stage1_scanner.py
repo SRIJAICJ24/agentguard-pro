@@ -208,3 +208,35 @@ def test_redaction_preserves_surrounding_context():
     assert "AKIAIOSFODNN7EXAMPLE" not in out
     assert "prod bucket" in out
     assert "redacted" in out
+
+
+@pytest.mark.parametrize("secret", [
+    "ghp_16C7e42F292c6912E7710c838347Ae178B4a",      # GitHub: detector reports only "ghp"
+    "AKIAIOSFODNN7EXAMPLE",
+])
+def test_redaction_removes_the_whole_secret(secret):
+    """Regression: detect-secrets' GitHub detector returns just the prefix as the
+    secret value, so redact_text replaced nothing and the full token reached the
+    audit log. Redaction must remove the whole matched secret."""
+    from agentguard.audit import digest_args
+    from agentguard.scanner import redact_text
+
+    for line in (f"export T={secret}", f"upload {secret}", f'{{"token": "{secret}"}}'):
+        assert secret not in redact_text(line), line
+    assert secret not in digest_args({"command": f"export T={secret} && run"})
+
+
+@pytest.mark.parametrize("secret", [
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    "sk_" "live_51H8xExampleAbCdEfGhIjKlMnOp",
+])
+def test_redaction_leaves_no_tail_of_a_longer_token(secret):
+    """Regression: detectors whose pattern matches only the start of a token (a
+    JWT's first two segments, a fixed-length Stripe prefix) left the rest of the
+    token - the JWT signature - in the redacted text."""
+    from agentguard.scanner import redact_text
+
+    import re
+
+    out = redact_text(f"value {secret} end")
+    assert re.fullmatch(r"value <redacted:[^>]+> end", out), out

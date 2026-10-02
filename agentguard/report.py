@@ -148,6 +148,17 @@ class Report:
     # prompt count for the hook surface).
     by_source: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Phase E: (detector_version, policy_version, calls) for the gated calls in
+    # the window. More than one entry means the numbers mix detection logic or
+    # rules, and the report says so.
+    versions: list[tuple[str, str, int]] = field(default_factory=list)
+    # Phase E: human labels -> precision (agentguard.labels.Precision).
+    precision: Any = None
+
+    @property
+    def mixed_versions(self) -> bool:
+        return len(self.versions) > 1
+
     # --- derived ----------------------------------------------------------
     def _pct(self, n: int) -> float:
         return (n / self.total_calls * 100) if self.total_calls else 0.0
@@ -212,6 +223,10 @@ class Report:
             "enough_data": self.enough_data,
             "agents": [{"agent": a, "calls": n} for a, n in self.agents],
             "by_source": self.by_source,
+            "versions": [{"detector_version": d, "policy_version": p, "calls": n}
+                         for d, p, n in self.versions],
+            "mixed_versions": self.mixed_versions,
+            "precision": self.precision.to_dict() if self.precision is not None else None,
         }
 
 
@@ -331,7 +346,49 @@ def build(since: str | timedelta = DEFAULT_SINCE,
             report.fp_candidates.append(candidate)
 
     report.by_source = _by_source(conn, start_iso, report)
+    report.versions = version_mix(conn, start_iso)
+
+    from agentguard.labels import precision as label_precision
+
+    report.precision = label_precision(start_iso, db_path)
     return report
+
+
+UNVERSIONED = "unversioned"
+
+
+def version_mix(conn: Any, start_iso: str) -> list[tuple[str, str, int]]:
+    """(detector_version, policy_version, calls) for gated calls since start.
+
+    Rows written before versions were recorded show as "unversioned": they may or
+    may not match the current code, and the report can't tell, so they count as a
+    version of their own rather than being assumed to match.
+    """
+    rows = conn.execute(
+        "SELECT detector_version, policy_version, COUNT(*) AS n FROM audit "
+        "WHERE stage = ? AND ts >= ? GROUP BY detector_version, policy_version "
+        "ORDER BY n DESC",
+        (CALL_STAGE, start_iso),
+    ).fetchall()
+    return [(r["detector_version"] or UNVERSIONED, r["policy_version"] or UNVERSIONED,
+             int(r["n"])) for r in rows]
+
+
+def render_versions(report: Report, colorize: Any = None) -> str:
+    def paint(text: str, key: str) -> str:
+        return colorize(text, key) if colorize else text
+
+    if not report.versions:
+        return ""
+    lines = ["  versions        : " + "; ".join(
+        f"detector {d} / policy {p}: {n} calls" for d, p, n in report.versions)]
+    if report.mixed_versions:
+        lines.append(paint(
+            f"  WARNING: {len(report.versions)} detector/policy versions in this window. "
+            f"These numbers mix different detection logic or rules - compare the "
+            f"periods separately (narrow --since) before trusting a single figure.",
+            "REVIEW"))
+    return "\n".join(lines)
 
 
 #: Review-queue kinds that come from the Claude Code hook surface.
@@ -422,6 +479,9 @@ def render(report: Report, colorize: Any = None) -> str:
 
     lines.append(f"  taint events    : {report.taint_events} "
                  f"(untrusted results fingerprinted)")
+    versions = render_versions(report, colorize)
+    if versions:
+        lines.append(versions)
     lines.append("")
     for label, count, pct, key in (
         ("ALLOW ", report.allow, report.allow_pct, "ALLOW"),
@@ -492,4 +552,9 @@ def render(report: Report, colorize: Any = None) -> str:
                        "that a human", "dim"))
     lines.append(paint("  overruled the gateway, not whether the human was right.",
                        "dim"))
+    if report.precision is not None:
+        from agentguard.labels import render_precision
+
+        lines.append("")
+        lines.append(render_precision(report.precision, colorize))
     return "\n".join(lines)

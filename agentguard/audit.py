@@ -32,10 +32,12 @@ HASHED_FIELDS = ("ts", "session_id", "agent", "role", "stage", "tool",
 #: `source` column existed; version 2 also covers `source`. Each row stores its
 #: version, so old rows keep verifying unchanged after the migration, and a row
 #: whose version is flipped to dodge coverage no longer matches its stored hash.
-HASH_VERSION = 2
+HASH_VERSION = 3
 _FIELDS_BY_VERSION: dict[int, tuple[str, ...]] = {
     1: HASHED_FIELDS,
     2: HASHED_FIELDS + ("source",),
+    # Phase E: which detector/policy made the decision, and in which mode.
+    3: HASHED_FIELDS + ("source", "policy_version", "detector_version", "mode"),
 }
 
 SOURCE_MCP = "mcp"
@@ -106,12 +108,22 @@ def record(
     detail: str | None = None,
     db_path: str | Path | None = None,
     source: str = SOURCE_MCP,
+    policy_version: str | None = None,
+    detector_version: str | None = None,
+    mode: str | None = None,
 ) -> int:
     """Append one decision. Returns the new row id.
 
     `source` says which surface saw the call: the MCP gateway (`mcp`) or a
-    Claude Code hook (`hook`). It is covered by the hash chain.
+    Claude Code hook (`hook`). `policy_version` / `detector_version` / `mode`
+    (observe | enforce) say which rules and which detection code decided it;
+    `detector_version` defaults to the running code's DETECTOR_VERSION. All of
+    them are covered by the hash chain.
     """
+    from agentguard.versions import DETECTOR_VERSION
+
+    if detector_version is None:
+        detector_version = DETECTOR_VERSION
     conn = connect(db_path)
     row = conn.execute("SELECT entry_hash FROM audit ORDER BY id DESC LIMIT 1").fetchone()
     prev_hash = row["entry_hash"] if row else GENESIS
@@ -130,16 +142,20 @@ def record(
         "signals": _canonical([s.to_dict() for s in decision.signals]),
         "detail": detail,
         "source": source,
+        "policy_version": policy_version,
+        "detector_version": detector_version,
+        "mode": mode,
     }
     entry_hash = _entry_hash(prev_hash, entry, HASH_VERSION)
 
     cur = conn.execute(
         """INSERT INTO audit (ts, session_id, agent, role, stage, tool, args_digest,
                               score, verdict, reason, signals, detail, prev_hash,
-                              entry_hash, source, hash_v)
+                              entry_hash, source, hash_v, policy_version,
+                              detector_version, mode)
            VALUES (:ts,:session_id,:agent,:role,:stage,:tool,:args_digest,
                    :score,:verdict,:reason,:signals,:detail,:prev_hash,:entry_hash,
-                   :source,:hash_v)""",
+                   :source,:hash_v,:policy_version,:detector_version,:mode)""",
         {**entry, "prev_hash": prev_hash, "entry_hash": entry_hash,
          "hash_v": HASH_VERSION},
     )

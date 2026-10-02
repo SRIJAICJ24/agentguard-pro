@@ -273,6 +273,9 @@ class HookEngine:
         self.taints = TaintRegistry()
         self.correlation = correlation or CorrelationIndex()
         self._denylist = list(self.policy.path_denylist) or list(DEFAULT_PATH_DENYLIST)
+        from agentguard.versions import policy_version
+
+        self.policy_version = policy_version(self.policy)
         self._asks: dict[str, int] = {}          # tool_use_id -> review item id
         self._lock = threading.Lock()
         # Recent decisions, in process, for tests and status. Bounded: the daemon
@@ -591,7 +594,8 @@ class HookEngine:
         audit.record(stage="TOOL_PREPARE", decision=decision, tool=call.tool,
                      arguments=_clip(tool_input), session_id=session,
                      agent=self._agent(payload), role=self.identity.role,
-                     detail=detail, db_path=self.db_path, source=SOURCE_HOOK)
+                     detail=detail, db_path=self.db_path, source=SOURCE_HOOK,
+                     policy_version=self.policy_version, mode=mode)
         self.events.append({"event": EVENT_PRE, "tool": call.tool,
                             "verdict": decision.verdict.value, "outcome": outcome,
                             "would": would, "signals": decision.signal_names,
@@ -665,4 +669,6 @@ class HookEngine:
             tool=call.tool, session_id=str(payload.get("session_id") or "unknown-session"),
             agent=self._agent(payload), role=self.identity.role, detail=detail,
             db_path=self.db_path, source=SOURCE_HOOK,
+            policy_version=self.policy_version,
+            mode="enforce" if self.enforcing else "observe",
         )
