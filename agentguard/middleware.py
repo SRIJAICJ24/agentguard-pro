@@ -30,7 +30,7 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from agentguard import audit
+from agentguard import audit, hardrules
 from agentguard.alignment import AlignmentAuditor, build_auditor
 from agentguard.behavior import BehaviorMonitor
 from agentguard.classify import DataClassifier
@@ -51,6 +51,7 @@ from agentguard.review_queue import KIND_TOOL_CALL, ReviewQueue
 from agentguard.risk import W_PIN_MISMATCH, RiskEngine
 from agentguard.scanner import DEFAULT_PATH_DENYLIST, scan_arguments
 from agentguard.scope import ScopeStore, TaskScope
+from agentguard.hooks import mcp_touches_protected
 from agentguard.sinks import SinkClassifier
 from agentguard.taint import TRUSTED, UNTRUSTED, TaintRegistry
 
@@ -311,6 +312,19 @@ class AgentGuardMiddleware(Middleware):
         extra.extend(fin.signals)
         floors.append((fin.verdict_floor, "financial"))
 
+        # 4i. self-protection for MCP calls: writes to AgentGuard's own config,
+        # policy, audit data or hook settings. It arrived with hard enforcement and
+        # runs only when `self_protection` is listed, so an empty list behaves as
+        # before.
+        if "self_protection" in self.policy.hard_enforce and \
+                mcp_touches_protected(self.policy, assessment.tiers, arguments):
+            extra.append(Signal(
+                "selfprotect:tamper", 0.0,
+                f"'{tool}' writes to AgentGuard's own configuration, audit data or the "
+                f"Claude Code settings that register its hooks",
+            ))
+            floors.append((Verdict.REVIEW, "self-protection"))
+
         decision = self.risk.evaluate(scan, extra)
 
         # Floors raise the verdict; they never lower it.
@@ -329,6 +343,19 @@ class AgentGuardMiddleware(Middleware):
         if pin_diff:
             decision.verdict = decision.verdict.escalate(Verdict.REVIEW)
             decision.override = "pin_mismatch"
+
+        # --- 4j. hard-enforced rules: refused in every mode ---------------
+        hard = hardrules.match(self.policy, decision.signal_names, assessment.tiers)
+        if hard:
+            for rule in hard:
+                decision.signals.append(Signal(
+                    f"{hardrules.SIGNAL_PREFIX}{rule}", 0.0,
+                    f"hard-enforced rule '{rule}': blocked even in observe mode"))
+            decision.verdict = Verdict.BLOCK
+            decision.override = "hard_enforce"
+            decision.reason = f"{decision.reason} | hard-enforced: {', '.join(hard)}"
+            self._block(decision, tool, arguments, session_id, absolute=True,
+                        detail=f"hard-enforced: {', '.join(hard)}")
 
         # --- 5. persistence tier: route to the quarantine ledger ----------
         # Checked before BLOCK/REVIEW handling because quarantining is the correct
@@ -467,11 +494,16 @@ class AgentGuardMiddleware(Middleware):
         return result
 
     def _block(self, decision: Decision, tool: str, arguments: Any,
-               session_id: str, absolute: bool = False) -> None:
+               session_id: str, absolute: bool = False, detail: str | None = None) -> None:
         """Log a BLOCK and, when enforcing (or `absolute`), stop the call by raising."""
         self._log("TOOL_PREPARE", decision, tool=tool, arguments=arguments,
-                  session_id=session_id)
+                  session_id=session_id, detail=detail)
         self.stats.blocked += 1
+        if absolute and decision.override == "hard_enforce":
+            raise ToolError(
+                f"AgentGuard blocked '{tool}' (hard-enforced rule - blocked even in "
+                f"observe mode): {decision.reason}"
+            )
         if absolute:
             raise ToolError(
                 f"AgentGuard blocked '{tool}': {decision.reason}. "

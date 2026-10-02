@@ -154,6 +154,9 @@ class Report:
     versions: list[tuple[str, str, int]] = field(default_factory=list)
     # Phase E: human labels -> precision (agentguard.labels.Precision).
     precision: Any = None
+    # (rule, count) for calls refused by a hard-enforced rule - these were
+    # actually stopped, even in observe mode, so they're reported apart.
+    hard_enforced: list[tuple[str, int]] = field(default_factory=list)
 
     @property
     def mixed_versions(self) -> bool:
@@ -227,6 +230,7 @@ class Report:
                          for d, p, n in self.versions],
             "mixed_versions": self.mixed_versions,
             "precision": self.precision.to_dict() if self.precision is not None else None,
+            "hard_enforced": [{"rule": r, "count": n} for r, n in self.hard_enforced],
         }
 
 
@@ -347,6 +351,11 @@ def build(since: str | timedelta = DEFAULT_SINCE,
 
     report.by_source = _by_source(conn, start_iso, report)
     report.versions = version_mix(conn, start_iso)
+    hard: dict[str, int] = {}
+    for name, count in report.signal_counts:
+        if name.startswith("hard_enforce:"):
+            hard[name[len("hard_enforce:"):]] = count
+    report.hard_enforced = sorted(hard.items(), key=lambda kv: (-kv[1], kv[0]))
 
     from agentguard.labels import precision as label_precision
 
@@ -482,6 +491,12 @@ def render(report: Report, colorize: Any = None) -> str:
     versions = render_versions(report, colorize)
     if versions:
         lines.append(versions)
+    if report.hard_enforced:
+        total = sum(n for _r, n in report.hard_enforced)
+        lines.append(paint(f"  HARD-ENFORCED   : {total} call(s) actually blocked, even in "
+                           f"observe mode", "BLOCK"))
+        for rule, n in report.hard_enforced:
+            lines.append(f"      {rule}  {n}")
     lines.append("")
     for label, count, pct, key in (
         ("ALLOW ", report.allow, report.allow_pct, "ALLOW"),

@@ -112,6 +112,9 @@ def row_mode(row: dict[str, Any]) -> str | None:
 def verdict_phrase(row: dict[str, Any]) -> str:
     """What the verdict meant at the time. In observe mode nothing was stopped."""
     verdict, mode = row.get("verdict"), row_mode(row)
+    if verdict == "BLOCK" and any(s.startswith("hard_enforce:") for s in signal_names(row)):
+        # A hard-enforced rule blocks in every mode, observe included.
+        return "BLOCKED (hard-enforced rule - blocked even in observe mode)"
     if verdict == "BLOCK":
         return {"observe": "WOULD HAVE BLOCKED (observe mode - it ran)",
                 "enforce": "BLOCKED"}.get(mode, "BLOCK (mode not recorded - in observe "

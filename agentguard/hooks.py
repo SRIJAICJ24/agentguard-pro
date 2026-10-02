@@ -50,7 +50,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from agentguard import audit
+from agentguard import audit, hardrules
 from agentguard.audit import SOURCE_HOOK
 from agentguard.classify import DataClassifier
 from agentguard.decision import Decision, Signal, Verdict
@@ -94,6 +94,7 @@ WRITE_TOOLS: dict[str, tuple[str, ...]] = {
     "NotebookEdit": ("new_source",),
 }
 READ_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "NotebookRead"})
+LIST_TOOLS = frozenset({"Glob", "LS"})
 
 _MCP_NAME = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$")
 _URL_HOST = re.compile(r"(?i)\b(?:https?|ftp|sftp|wss?)://(?:[^@/\s'\"]+@)?(\[[^\]]+\]|[^/\s:'\"?#]+)")
@@ -152,6 +153,61 @@ def claude_home() -> Path:
 
 def _posix_lower(path: str | Path) -> str:
     return str(path).replace("\\", "/").rstrip("/").lower()
+
+
+# --- self-protection: shared by the hooks and the MCP gateway ---------------
+def _protected_roots(policy: Policy) -> list[str]:
+    from agentguard.config import agentguard_home
+
+    roots = [_posix_lower(agentguard_home()), _posix_lower(claude_home() / "settings.json"),
+             _posix_lower(claude_home() / "settings.local.json")]
+    if policy.source_path:
+        roots.append(_posix_lower(Path(policy.source_path).resolve()))
+    return roots
+
+
+def protected_path(policy: Policy, path: str) -> bool:
+    """Is `path` AgentGuard's own config, policy, audit data, daemon definition,
+    or a Claude Code settings file that registers its hooks?"""
+    norm = _posix_lower(path)
+    for root in _protected_roots(policy):
+        if norm == root or norm.startswith(root + "/"):
+            return True
+    return any(fnmatch(norm, g.lower()) for g in policy.hooks.self_protect_paths)
+
+
+def protected_command(policy: Policy, command: str) -> bool:
+    """Does a shell command touch those files, or stop/disable AgentGuard?"""
+    if any(re.search(p, command, re.IGNORECASE) for p in policy.hooks.self_protect_commands):
+        return True
+    norm = command.replace("\\", "/").lower()
+    if any(root in norm for root in _protected_roots(policy)):
+        return True
+    # Commands name files relatively or via ~, so match the distinctive tail of
+    # each protected location as well as its absolute form.
+    markers = [g.lower().lstrip("*").lstrip("/") for g in policy.hooks.self_protect_paths]
+    markers += ["/.agentguard", "agentguard.db", "agentguard.json"]
+    return any(marker and marker in norm for marker in markers)
+
+
+_COMMAND_KEYS = ("command", "cmd", "script", "shell")
+
+
+def mcp_touches_protected(policy: Policy, tiers: list[str], arguments: Any) -> bool:
+    """Does an MCP call write to a protected file, or run a protected command?
+
+    Writes are judged by tier (propagation/persistence: file writes, edits) and
+    any path-like argument; commands by argument name, whatever the tool.
+    """
+    writes = TIER_PROPAGATION in tiers or TIER_PERSISTENCE in tiers
+    for where, value in flatten(arguments):
+        key = where.rsplit(".", 1)[-1].split("[", 1)[0].lower()
+        if key in _COMMAND_KEYS and protected_command(policy, value):
+            return True
+        if writes and ("/" in value or "\\" in value) and "\n" not in value \
+                and len(value) < 1024 and protected_path(policy, value):
+            return True
+    return False
 
 
 # --- correlation: the MCP gateway <-> Claude Code session bridge -----------
@@ -221,6 +277,9 @@ class MappedCall:
     mcp_server: str | None = None
     via_gateway: bool = False
     self_protect: bool = False
+    # Tools that only list names (Glob, LS): a credential *path* in their input
+    # isn't a read of the credential, so `credential_files` doesn't apply.
+    lists_only: bool = False
 
 
 def _tokens(command: str) -> list[str]:
@@ -312,8 +371,14 @@ class HookEngine:
             server = (payload.get("mcp_server") or {}).get("name") or m.group("server")
             inner = m.group("tool")
             via = server in hooks.gateway_servers or m.group("server") in hooks.gateway_servers
-            return MappedCall(tool, inner, dict(tool_input), self.policy.sink_tiers(inner),
-                              mcp_server=server, via_gateway=via)
+            tiers = self.policy.sink_tiers(inner)
+            # Self-protection for MCP tools came with hard enforcement, so it runs
+            # only when that rule is listed: an empty list behaves as before.
+            return MappedCall(tool, inner, dict(tool_input), tiers,
+                              mcp_server=server, via_gateway=via,
+                              self_protect=hooks.self_protection
+                              and "self_protection" in self.policy.hard_enforce
+                              and mcp_touches_protected(self.policy, tiers, tool_input))
 
         if tool in SHELL_TOOLS:
             return self._map_shell(tool, str(tool_input.get("command", "")))
@@ -337,7 +402,8 @@ class HookEngine:
                               [TIER_ORDINARY, TIER_EXFILTRATION])
 
         if tool in READ_TOOLS or tool == "WebSearch":
-            return MappedCall(tool, tool, dict(tool_input), [TIER_ORDINARY])
+            return MappedCall(tool, tool, dict(tool_input), [TIER_ORDINARY],
+                              lists_only=tool in LIST_TOOLS)
 
         # Anything else (Agent, AskUserQuestion, new tools): scan the input, and
         # let the policy's sink globs place it, so custom names stay configurable.
@@ -383,38 +449,11 @@ class HookEngine:
         return call
 
     # --- self-protection (A6) --------------------------------------------
-    def _protected_roots(self) -> list[str]:
-        from agentguard.config import agentguard_home
-
-        roots = [_posix_lower(agentguard_home()), _posix_lower(claude_home() / "settings.json"),
-                 _posix_lower(claude_home() / "settings.local.json")]
-        if self.policy.source_path:
-            roots.append(_posix_lower(Path(self.policy.source_path).resolve()))
-        return roots
-
     def _protected_path(self, path: str) -> bool:
-        if not self.policy.hooks.self_protection:
-            return False
-        norm = _posix_lower(path)
-        for root in self._protected_roots():
-            if norm == root or norm.startswith(root + "/"):
-                return True
-        return any(fnmatch(norm, g.lower()) for g in self.policy.hooks.self_protect_paths)
+        return self.policy.hooks.self_protection and protected_path(self.policy, path)
 
     def _protected_command(self, command: str) -> bool:
-        if not self.policy.hooks.self_protection:
-            return False
-        if any(re.search(p, command, re.IGNORECASE)
-               for p in self.policy.hooks.self_protect_commands):
-            return True
-        norm = command.replace("\\", "/").lower()
-        if any(root in norm for root in self._protected_roots()):
-            return True
-        # Commands name files relatively or via ~, so match the distinctive tail of
-        # each protected location as well as its absolute form.
-        markers = [g.lower().lstrip("*").lstrip("/") for g in self.policy.hooks.self_protect_paths]
-        markers += ["/.agentguard", "agentguard.db", "agentguard.json"]
-        return any(marker and marker in norm for marker in markers)
+        return self.policy.hooks.self_protection and protected_command(self.policy, command)
 
     # ------------------------------------------------------------------
     # PreToolUse
@@ -511,6 +550,18 @@ class HookEngine:
                 decision.reason = f"{decision.reason} | {label}"
         decision.override = override
 
+        # Hard-enforced rules (policy `hard_enforce`): blocked in every mode.
+        hard = hardrules.match(self.policy, decision.signal_names, call.tiers,
+                               lists_only=call.lists_only)
+        if hard:
+            for rule in hard:
+                decision.signals.append(Signal(
+                    f"{hardrules.SIGNAL_PREFIX}{rule}", 0.0,
+                    f"hard-enforced rule '{rule}': blocked even in observe mode"))
+            decision.verdict = Verdict.BLOCK
+            decision.override = "hard_enforce"
+            decision.reason = f"{decision.reason} | hard-enforced: {', '.join(hard)}"
+
         # A tainted write to durable memory (an MCP memory tool not behind the
         # gateway): hold a copy in the quarantine ledger, as the gateway does.
         detail_extra = ""
@@ -546,10 +597,13 @@ class HookEngine:
         tool_use_id = payload.get("tool_use_id")
         tool_input = payload.get("tool_input") or {}
         sp = call.self_protect
+        hard = decision.override == "hard_enforce"
 
         response: dict[str, Any] = {}
         outcome = "no decision"
-        if self.enforcing:
+        if hard:
+            outcome = "deny"                       # every mode, by definition
+        elif self.enforcing:
             if decision.verdict is Verdict.BLOCK or (decision.verdict is Verdict.REVIEW and sp):
                 outcome = "deny"
             elif decision.verdict is Verdict.REVIEW or dlp.redacted_arguments is not None:
@@ -577,6 +631,9 @@ class HookEngine:
 
         reason = (f"AgentGuard: {decision.reason} (score {decision.score:.2f})"
                   + (f" - review #{review_id}" if review_id else ""))
+        if hard:
+            reason = (f"AgentGuard hard-enforced rule - blocked even in observe mode: "
+                      f"{decision.reason} (score {decision.score:.2f})")
         if outcome in ("deny", "ask"):
             out: dict[str, Any] = {"hookEventName": EVENT_PRE,
                                    "permissionDecision": outcome,
@@ -587,7 +644,8 @@ class HookEngine:
 
         mode = "enforce" if self.enforcing else "observe"
         detail = (f"claude-code {mode}: {outcome}"
-                  + ("" if self.enforcing else f" (would {would})")
+                  + (" (hard-enforced)" if hard else
+                     "" if self.enforcing else f" (would {would})")
                   + (f"; tool_use_id {tool_use_id}" if tool_use_id else "")
                   + (f"; subagent {payload.get('agent_type')}" if payload.get("agent_id") else "")
                   + detail_extra)

@@ -6,6 +6,20 @@
 # your own traffic, then flip enforcement to true.
 enforcement: false
 
+# Hard-enforced rules block even in observe mode; every other rule keeps observe
+# behaviour (log only). Delete a line to make that rule observe-only again;
+# `hard_enforce: []` gives back plain all-observe behaviour.
+#   credential_files     reading ~/.ssh, ~/.aws or .env files (writes and
+#                        name-only listings are not covered)
+#   secret_exfiltration  a real secret in a call that sends data out (email,
+#                        upload, curl/wget to an unlisted host, ...)
+#   self_protection      the agent editing AgentGuard's own config, policy, audit
+#                        database, or the Claude Code settings that register its hooks
+hard_enforce:
+  - credential_files
+  - secret_exfiltration
+  - self_protection
+
 thresholds:
   allow_below: 0.25    # score < this            -> ALLOW
   block_above: 0.75    # score > this            -> BLOCK, in between -> REVIEW

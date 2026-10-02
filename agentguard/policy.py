@@ -183,6 +183,14 @@ class FinancialConfig:
     cap_currency: str | None = None
 
 
+#: Rules that may be hard-enforced: they block even in observe mode, while every
+#: other rule keeps observe behaviour. See agentguard/hardrules.py.
+HARD_RULES: tuple[str, ...] = ("credential_files", "secret_exfiltration", "self_protection")
+#: What the shipped policy and the onboarding starter policy enable. A Policy built
+#: in code starts with an empty list, which behaves exactly as before the feature.
+DEFAULT_HARD_ENFORCE: list[str] = list(HARD_RULES)
+
+
 #: Default Claude Code hook patterns (readiness phase). They live here only so a
 #: missing `hooks:` section still gets sane behaviour; the shipped policy YAML
 #: lists them explicitly, and anything under `hooks.bash.*` in YAML replaces the
@@ -355,6 +363,8 @@ class Policy:
     alignment: AlignmentConfig = field(default_factory=AlignmentConfig)
     financial: FinancialConfig = field(default_factory=FinancialConfig)
     hooks: HooksConfig = field(default_factory=HooksConfig)
+    # Rules from HARD_RULES that block even when `enforcement` is false.
+    hard_enforce: list[str] = field(default_factory=list)
     source_path: Path | None = None
 
     # --- tool-level rules (checked before scoring) -------------------------
@@ -521,6 +531,14 @@ def from_dict(data: dict[str, Any]) -> Policy:
 
     if data.get("hooks"):
         p.hooks = _hooks_from_dict(data["hooks"])
+
+    if "hard_enforce" in data:
+        rules = _as_list(data.get("hard_enforce"))
+        unknown = [r for r in rules if r not in HARD_RULES]
+        if unknown:
+            raise ValueError(f"hard_enforce: unknown rule(s) {unknown}; "
+                             f"choose from {list(HARD_RULES)}")
+        p.hard_enforce = list(dict.fromkeys(rules))
     return p
 
 

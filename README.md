@@ -11,7 +11,7 @@ Nothing leaves your machine.
 behaviour monitoring, the red-team simulator, the distribution layer, the validation
 tooling, and the September 2026 threat update (worm detection, volume-aware DLP,
 declared task scope, a financial tier with a global lock, and a
-[standards mapping](docs/standards-mapping.md)). 320 tests pass. Every Stage 7 detector
+[standards mapping](docs/standards-mapping.md)). 357 tests pass. Every Stage 7 detector
 ships observe-only like everything else. See
 [What's built so far](#whats-built-so-far) for the honest breakdown.
 
@@ -204,11 +204,26 @@ target this project's `.claude/settings.json` / `settings.local.json` instead.
 | `WebFetch` / `WebSearch` | results are **untrusted** and fingerprinted into the session's taint map, so a later `Write` or `curl` of that text is caught |
 | MCP tools | gated by the hook, unless the server is routed through the AgentGuard gateway (`hooks.gateway_servers`), in which case only the gateway counts it |
 
-**Observe mode never interferes.** Every call is logged (`source = hook` in the audit log),
-and Claude Code's normal permission flow decides. In **enforce mode**, BLOCK → deny and
-REVIEW → ask: Claude Code's own permission prompt is the review step, and an ask you
-approve is counted in `report` as a false-positive candidate. AgentGuard never answers
-"allow", because that would skip Claude Code's own prompts.
+**Observe mode doesn't interfere, except for a short hard-enforced list.** Every call is
+logged (`source = hook` in the audit log), and Claude Code's normal permission flow decides.
+In **enforce mode**, BLOCK → deny and REVIEW → ask: Claude Code's own permission prompt is
+the review step, and an ask you approve is counted in `report` as a false-positive
+candidate. AgentGuard never answers "allow", because that would skip Claude Code's own
+prompts.
+
+**Hard-enforced rules** (`hard_enforce:` in `agentguard.policy.yaml`) block even in observe
+mode, through both the hooks (deny) and the MCP gateway (call refused):
+
+| Rule | Blocks |
+|---|---|
+| `credential_files` | reading `~/.ssh`, `~/.aws` or `.env` files (writes to them, and name-only listings, aren't covered) |
+| `secret_exfiltration` | a real secret (a detect-secrets structural finding, not an entropy guess) in a call that sends data out |
+| `self_protection` | the agent editing AgentGuard's config, policy, audit database, or the Claude Code settings that register its hooks |
+
+The shipped policy and the onboarding starter policy enable all three. Delete a line to make
+that rule observe-only again; `hard_enforce: []` gives back the original all-observe
+behaviour. These blocks are logged with a `hard_enforce:<rule>` signal, and `report` lists
+them separately as calls that were *actually* stopped.
 
 **If the daemon is down**, the HTTP hook fails open (Claude Code treats it as a non-blocking
 error, and that can't be changed). If you need fail-closed, install the stdlib-only command
@@ -649,7 +664,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-320 tests, one file per stage. The ones that matter most are the four attack
+357 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -695,6 +710,7 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 - [x] **Stage 7E** — [standards mapping](docs/standards-mapping.md) with a Gaps column
 - [x] **Readiness A** — Claude Code hooks (HTTP endpoint + stdlib command fallback), tool mapping for Bash/PowerShell/Read/Write/Edit/WebFetch/WebSearch/MCP, gateway↔hook taint bridge, observe/enforce mapping, self-protection, `install-hooks`/`uninstall-hooks`, `source` column with a chain-preserving migration, `report --by-source`, hooks-only daemon that restarts on Windows
 - [x] **Readiness E** — `report --fp-review` labeler (labels kept outside the audit chain), precision by source and signal with n and an n < 20 warning, detector/policy/mode versions on every audit row with a version-mix warning, anonymized `report --export`
+- [x] **Hard enforcement** — `hard_enforce:` rules (credential files, secret exfiltration, self-protection) that block even in observe mode, via hooks and the MCP gateway, reported separately
 - [ ] **The validation week itself** — not yet run. This is the gate on everything below. Stage 7 detectors and the hooks should be measured in the same week.
 - [ ] Packaged install (`pipx install agentguard` once published to PyPI)
 
@@ -807,13 +823,14 @@ agentguard/
   labels.py      `report --fp-review` labeler + precision                      (E)
   versions.py    DETECTOR_VERSION, detection-code fingerprint, policy hash    (E)
   export.py      anonymized CSV/JSON export                                    (E)
+  hardrules.py   rules that block even in observe mode (`hard_enforce`)
   cli.py         command line interface
 docs/BUILD_PROMPTS.md       the staged build specification
 docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
 docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           320 tests, one file per stage
+tests/           357 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").
