@@ -11,7 +11,20 @@ in them came from the same code and the same rules, so:
 
 | Tag | Detector version | Policy hash | Live policy file | Install | Start date (UTC) | End date |
 |---|---|---|---|---|---|---|
-| `week1` | `2026.10.3` | `p-78e342c112` | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week1`, non-editable, venv `D:/agentguard-week` | 2026-10-02 (frozen); set to the day the daemon is first activated from the venv | — |
+| `week1` | `2026.10.3` | `p-78e342c112` | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week1`, non-editable, venv `D:/agentguard-week` | **2026-10-03** (frozen 2026-10-02; the daemon first answered from the venv at about 04:40 UTC, first hook row is audit #14 at 04:41 UTC) | — |
+
+Install notes for this line:
+
+- The daemon starts from `~/.agentguard/agentguard-daemon.vbs` (hidden window, restarts
+  itself within about 5 seconds if it exits). Auto-start at login is a copy of that file in
+  the Windows Startup folder, **not** a scheduled task: `onboard --activate` could not
+  create the task without Administrator rights.
+- Audit rows #1-#13 predate this install (older code, no workspace label); a report
+  window that includes them shows a version-mix warning. Count from #14 onward.
+- Audit rows from `D:\agentgaurd` (the dev workspace) are excluded from reports by default.
+- Self-protection is live: during this session AgentGuard blocked a read-only command of
+  Claude's that named the live audit database, because command-text matching cannot tell
+  reading from editing. Changes to the live policy or home must be made by the user.
 
 How to check what's actually running against this line:
 
