@@ -11,13 +11,32 @@ Nothing leaves your machine.
 behaviour monitoring, the red-team simulator, the distribution layer, the validation
 tooling, and the September 2026 threat update (worm detection, volume-aware DLP,
 declared task scope, a financial tier with a global lock, and a
-[standards mapping](docs/standards-mapping.md)). 427 tests pass. Every Stage 7 detector
+[standards mapping](docs/standards-mapping.md)). 514 tests pass. Every Stage 7 detector
 ships observe-only like everything else. See
 [What's built so far](#whats-built-so-far) for the honest breakdown.
 
-**The open question is the false-positive rate on real traffic.** Every FP number
-quoted here so far is synthetic. `agentguard report` exists to replace it with a
-measured one — see [Measuring it on your own traffic](#measuring-it-on-your-own-traffic).
+**Measured false-positive rate.** The numbers below come from real traffic, not a test set.
+They are 6,455 real Claude Code tool calls from one developer's past sessions (13 projects:
+web apps, Android, a Godot game, docs), replayed through the hook engine with
+`agentguard replay`. The work was ordinary, so nearly every flag is a false alarm:
+
+| Detector version | Flagged (REVIEW or BLOCK) | Hard-blocked even in observe mode |
+|---|---|---|
+| 2026.10.3 (week 1) | 600 (9.3%) | 113 |
+| 2026.10.4 (week 2) | 82 (1.3%) | 30 |
+
+All 30 remaining hard blocks are real reads of real secret files (`cat .env.live-dev`,
+`grep KEY .env.local`, `docker compose config` printing resolved secrets). The rule is
+meant to stop exactly those, even when the developer meant no harm. The week 2 fixes are
+listed in [docs/week-log.md](docs/week-log.md). This is one person's history, so measure
+your own before you turn on enforce mode:
+
+```bash
+agentguard replay --examples 10      # read-only; writes nothing outside a temp folder
+```
+
+**What isn't measured:** recall against real attacks. No real attack traffic exists to
+replay. Attack coverage is measured only by the simulator and the test suite.
 
 Built on [FastMCP](https://github.com/jlowin/fastmcp) (v3) rather than hand-rolled
 JSON-RPC, and [`detect-secrets`](https://github.com/Yelp/detect-secrets) rather than
@@ -440,10 +459,15 @@ constantly on ordinary prose — measured during this build, the string
 finding pushes the risk score toward BLOCK, wiring the library in as-is would have made
 the gateway unusable on real traffic long before it ever missed an attack.
 
-So structural detectors always run at full weight, while the two entropy detectors run
-only against text that already looks credential-bearing (`key=`, `token:`,
-`password …`) and carry a lower weight. Real base64/hex secrets are still caught;
-English sentences are not blocked. `test_scanner_is_quiet_on_ordinary_prose` guards this.
+So structural detectors always run at full weight, while the entropy check runs only on
+the *value given to a credential name* (`AUTH_TOKEN=…`, `"client_secret": "…"`,
+`Authorization: Bearer …`) and carries a lower weight. Until detector 2026.10.4 the
+entropy check ran on any line that merely contained a credential word. On real traffic that
+flagged `cat apps/web/lib/auth.ts` and commit hashes in documents about auth: 334 of
+6,455 replayed calls. It also missed unquoted `export AUTH_TOKEN=<value>`. Measured
+miss rate on random tokens given to a credential name: 0 in 2,000 at 43 characters,
+0.25% at 32, 2.6% at 22. `test_scanner_is_quiet_on_ordinary_prose` and
+`tests/test_week2_accuracy.py` guard this.
 
 ### Risk weights are calibrated so each signal decides its own verdict
 
@@ -684,7 +708,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-427 tests, one file per stage. The ones that matter most are the four attack
+514 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -732,7 +756,12 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 - [x] **Readiness E** — `report --fp-review` labeler (labels kept outside the audit chain), precision by source and signal with n and an n < 20 warning, detector/policy/mode versions on every audit row with a version-mix warning, anonymized `report --export`
 - [x] **Hard enforcement** — `hard_enforce:` rules (credential files, secret exfiltration, self-protection) that block even in observe mode, via hooks and the MCP gateway, reported separately
 - [x] **Week 1 prep (F1-F5)** — modern key formats with whole-token redaction, workspace labels with dev-workspace exclusion, gap detection in `status`/`report`/`doctor`, live-setup-only self-protection, frozen non-editable install (see [docs/week-log.md](docs/week-log.md))
-- [ ] **The validation week itself** — not yet run. This is the gate on everything below. Stage 7 detectors and the hooks should be measured in the same week.
+- [x] **Week 2 accuracy** — fixes driven by real traffic: deletes inside temp, value-based
+  entropy, `.env` templates and "named but not read" credential paths, local database URLs,
+  user-facing tools. Plus `agentguard replay` to measure on your own history, and
+  `simulate` working from a pip install
+- [ ] **The validation week itself** — week 1 started 2026-10-03 on detector 2026.10.3.
+  Labelled precision from it is still too small to quote (n < 20)
 - [ ] Packaged install (`pipx install agentguard` once published to PyPI)
 
 ### Known limitations, stated plainly
@@ -809,9 +838,25 @@ Run the suite with `AGENTGUARD_HOME` pointed at a temporary directory. Some test
 
   A format not on that list (Google's newer `AQ.` keys, for example) is neither flagged
   nor redacted.
+- **Shell commands are parsed, not executed.** `agentguard/shellcmd.py` follows plain
+  variable assignments and `cd`, so it can tell that `rm -rf "$OUT/x"` with
+  `OUT=<temp dir>` stays inside temp. Anything it can't resolve counts as unsafe: a variable
+  set elsewhere, `$(…)`, `..`, or the temp root itself. A delete the parser can't prove safe
+  still goes to REVIEW. The session's working directory never counts as temp.
+- **"Named but not read" is a list of commands.** `ls`, `test`, `git status/add/check-ignore`,
+  `source`, `--env-file`, `dotenv -f` and redirect targets use a credential file without
+  printing it. Any other command that names one counts as a read, including `cp`, `mv` and
+  a `for` loop over file names. A program that prints the variables it loaded
+  (`python -m dotenv … run -- env`) is not caught by this rule.
+- **Credential-file templates are judged by name.** `.env.example`, `.sample`,
+  `.template`, `.tmpl`, `.tpl`, `.dist` and `.defaults` are not credential files. A real
+  secret pasted into one is still caught by the secret scanner, not by the path rule.
 - **Export redaction errs toward removing too much.** A string containing a word like
   "secret" or "token" switches on entropy-based redaction for the whole string, so a little
   harmless text can disappear along with the secret.
+- **Local database URLs are not treated as secrets.** `user:password@host` is ignored when
+  the host is loopback, `host.docker.internal` or a name without a dot (a container
+  service). A real password used against such a host is not flagged.
 
 ---
 
@@ -855,13 +900,16 @@ agentguard/
   export.py      anonymized CSV/JSON export                                    (E)
   hardrules.py   rules that block even in observe mode (`hard_enforce`)
   workspace.py   short workspace labels for hook rows (F2)
+  shellcmd.py    shell parsing: delete targets in temp, credential path read vs named
+  replay.py      `agentguard replay`: past Claude Code transcripts through the engine
+  mock_upstream.py the mock MCP server used by `simulate` (examples/ has a shim)
   cli.py         command line interface
 docs/BUILD_PROMPTS.md       the staged build specification
 docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
 docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           427 tests, one file per stage
+tests/           514 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").

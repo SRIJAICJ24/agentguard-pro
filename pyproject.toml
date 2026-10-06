@@ -4,10 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentguard"
-version = "0.2.0"
-description = "Local-first runtime security gateway for MCP-based AI agents"
+version = "0.3.0"
+description = "Local-first runtime security gateway for AI agents: Claude Code hooks and an MCP proxy"
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["ai-agents", "security", "mcp", "claude-code", "prompt-injection", "dlp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
 dependencies = [
     "fastmcp>=3.0",
     "detect-secrets>=1.5",

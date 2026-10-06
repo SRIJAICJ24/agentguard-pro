@@ -11,7 +11,50 @@ in them came from the same code and the same rules, so:
 
 | Tag | Detector version | Policy hash | Live policy file | Install | Start date (UTC) | End date |
 |---|---|---|---|---|---|---|
-| `week1` | `2026.10.3` | `p-78e342c112` | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week1`, non-editable, venv `D:/agentguard-week` | **2026-10-03** (frozen 2026-10-02; the daemon first answered from the venv at about 04:40 UTC, first hook row is audit #14 at 04:41 UTC) | — |
+| `week1` | `2026.10.3` | `p-78e342c112` | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week1`, non-editable, venv `D:/agentguard-week` | **2026-10-03** (frozen 2026-10-02; the daemon first answered from the venv at about 04:40 UTC, first hook row is audit #14 at 04:41 UTC) | ends when `week2` is installed |
+| `week2` | `2026.10.4` | `p-68f143cdb5` (the week1 live policy file, unchanged, hashes to this under week2 code: the new `temp_deletes_ok` setting defaults to true) | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week2`, non-editable, same venv | not installed yet: starts when the user reinstalls | — |
+
+## Why week2 exists: week 1 accuracy, measured
+
+Week 1 numbers (detector 2026.10.3, observe mode, 2026-10-03 to 2026-10-06, dev workspace
+excluded): 412 hook calls, 397 ALLOW, 15 REVIEW, 0 BLOCK. All 15 flags were inspected, and
+all 15 were false alarms:
+
+- 14 were `hook:destructive_command` on `rm -rf "$OUT/..."`, where `OUT` was Claude's
+  scratchpad under the system temp directory.
+- 1 was `secret_entropy:Hex High Entropy String` on a command that only contained the
+  word "auth" near a hash.
+
+A replay of every earlier Claude Code transcript on the machine (`agentguard replay`,
+6,455 tool calls, 13 projects, dev workspace skipped) gave a much larger sample of the
+same traffic:
+
+| | Flagged | Hard-blocked | Main causes |
+|---|---|---|---|
+| 2026.10.3 | 600 (9.3%) | 113 | entropy on lines containing "auth" (334); `.env.example` / `--env-file` read as credential reads (97 hard); temp deletes (41) |
+| 2026.10.4 | 82 (1.3%) | 30 | real reads of real `.env.*` files (30 hard); workspace and home deletes (19); secret-shaped test fixtures (17) |
+
+Changes, each with regression tests in `tests/test_week2_accuracy.py`, which fail on
+`week1` (35 + 6 cases) and pass now:
+
+1. A recursive delete whose every target is provably inside temp is logged as
+   `hook:delete_in_temp` (`hooks.temp_deletes_ok`).
+2. Entropy runs on values given to credential names. This also fixes a miss: unquoted
+   `export AUTH_TOKEN=<value>` was not detected before.
+3. `.env.example` and other templates aren't credential files. A credential path that is
+   only named (`test -f`, `ls`, `git check-ignore`, `source`, `--env-file`, `dotenv -f`, a
+   redirect target) is `credpath:referenced`, not a read. grep patterns aren't paths.
+4. Local database URLs aren't Basic Auth secrets.
+5. User-facing built-ins (SendUserFile, AskUserQuestion, ...) are never sinks.
+
+Every attack case in that file passes on both versions. Week 1's 412-call sample was too
+small to label precision (1 label). Week 2's line starts a fresh count.
+
+Install notes for week2: the live policy copy at `D:/agentguard-week/agentguard.policy.yaml`
+does not need editing. It is self-protected, so any edit is the user's to make. The new
+setting defaults to true, and the policy hash is taken over the parsed settings, so the
+unchanged file and the week2 shipped file both hash to `p-68f143cdb5`. The hash differs
+from week1's `p-78e342c112` only because the settings gained a field.
 
 Install notes for this line:
 
