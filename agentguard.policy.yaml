@@ -180,6 +180,11 @@ hooks:
       - '\bformat\s+[a-z]:'
       - '\b(diskpart|shred|wipefs)\b'
       - '\bFormat-Volume\b|\bClear-Disk\b'
+  # A recursive delete whose every target is provably inside the system temp
+  # directory (an agent clearing its own scratch folder) is logged as
+  # hook:delete_in_temp instead of going to REVIEW. Unknown variables, `..`,
+  # the temp root itself and anything outside temp still go to REVIEW.
+  temp_deletes_ok: true
   # Writes, edits and shell commands touching AgentGuard's own config, policy,
   # audit database, the Claude Code settings that register these hooks, or its
   # daemon -> REVIEW, and deny in enforce mode. This raises the bar; it does not

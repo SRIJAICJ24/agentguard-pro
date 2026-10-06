@@ -95,6 +95,61 @@ CRED_CONTEXT = re.compile(
     r"bearer|access[_-]?key|private[_-]?key|client[_-]?secret|session[_-]?id)\b"
 )
 
+# The entropy tier looks only at the *value* given to a credential name -
+# `AUTH_TOKEN=...`, `"client_secret": "..."`, `Authorization: Bearer ...` - not at
+# every string on a line that happens to contain the word "auth". Week 2: the
+# line-level gate flagged 334 of 6,435 replayed real calls (`cat lib/auth.ts`,
+# commit hashes in a document that mentions auth) and still missed unquoted
+# `export AUTH_TOKEN=<value>`, which detect-secrets' quoted-string scan skips.
+CRED_VALUE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:api[_-]?key|secret|token|password|passwd|pwd|credentials?|"
+    r"auth(?:orization)?|bearer|access[_-]?key|private[_-]?key|client[_-]?secret|"
+    r"session[_-]?id)[A-Za-z0-9_\-]*[\"']?\s*(?::=|=>|=|:|\s)\s*"
+    r"(?:(?:bearer|basic|token)\s+)?[\"']?([A-Za-z0-9+/_\-.~=]{16,})"
+)
+_PLACEHOLDER = re.compile(r"(?i)example|placeholder|changeme|your|xxxx|dummy|redacted|sample")
+
+
+def _entropy_label(value: str) -> str | None:
+    """The detect-secrets entropy type `value` qualifies as, or None."""
+    from detect_secrets.plugins.high_entropy_strings import (
+        Base64HighEntropyString, HexHighEntropyString)
+    import math
+
+    value = value.rstrip(".")                 # sentence punctuation, not the value
+    if len(value) < 16 or _PLACEHOLDER.search(value):
+        return None
+    has_digit = bool(re.search(r"\d", value))
+    mixed_case = bool(re.search(r"[a-z]", value) and re.search(r"[A-Z]", value))
+    # Identifiers (`access_token_expires_at`, `process.env.API_KEY`) have no digits
+    # or no case mix; random tokens nearly always have both. A long token with no
+    # digit must clear detect-secrets' full bar.
+    if not re.search(r"[A-Za-z]", value) or not (has_digit or (mixed_case and len(value) >= 32)):
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]+", value):
+        hex_limit = next(s["limit"] for s in _ENTROPY_SETTINGS if s["name"].startswith("Hex"))
+        if HexHighEntropyString(limit=hex_limit).calculate_shannon_entropy(value) > hex_limit:
+            return "Hex High Entropy String"
+        return None
+    b64_limit = next(s["limit"] for s in _ENTROPY_SETTINGS if s["name"].startswith("Base64"))
+    # Short tokens can't reach detect-secrets' 4.5 bits (a 22-character random
+    # token measures about 4.4), so the bar scales with length; the credential
+    # name in front of the value is what makes a lower bar safe here.
+    limit = max(3.0, min(b64_limit, 0.8 * math.log2(len(value)))) if has_digit else b64_limit
+    if Base64HighEntropyString(limit=b64_limit).calculate_shannon_entropy(value) > limit:
+        return "Base64 High Entropy String"
+    return None
+
+
+def credential_values(line: str) -> list[tuple[str, str]]:
+    """(value, entropy label) for each high-entropy value given to a credential name."""
+    out: list[tuple[str, str]] = []
+    for m in CRED_VALUE.finditer(line):
+        label = _entropy_label(m.group(1))
+        if label:
+            out.append((m.group(1), label))
+    return out
+
 # Paths a tool call should never touch by default.
 DEFAULT_PATH_DENYLIST: tuple[str, ...] = (
     "**/.ssh/**", "**/.ssh", "**/.aws/**", "**/.env", "**/.env.*",
@@ -102,6 +157,10 @@ DEFAULT_PATH_DENYLIST: tuple[str, ...] = (
     "**/id_rsa*", "**/id_ed25519*", "**/.netrc", "**/.npmrc",
     "**/.docker/config.json", "**/shadow", "**/.kube/config",
 )
+#: Committed templates of credential files (`.env.example`) hold names, not
+#: secrets. Week 2: 97 hard blocks in the replay were reads/diffs of these.
+TEMPLATE_SUFFIXES: tuple[str, ...] = (".example", ".sample", ".template", ".tmpl",
+                                      ".tpl", ".dist", ".defaults")
 
 # Prompt-injection and jailbreak phrasings, as (name, pattern).
 INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -255,6 +314,20 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
     return unique
 
 
+_USERINFO_URL = re.compile(r"[a-z][a-z0-9+.\-]*://[^\s:/@'\"]+:[^\s/@'\"]*@(\[[^\]]+\]|[^\s/:'\"?#]+)",
+                           re.IGNORECASE)
+_LOCAL_HOSTS = re.compile(r"^(localhost|127(\.\d{1,3}){3}|\[?::1\]?|0\.0\.0\.0|"
+                          r"host\.docker\.internal|[a-z0-9_\-]+)$", re.IGNORECASE)
+
+
+def _local_basic_auth(line: str) -> bool:
+    """True if every `scheme://user:pass@host` on the line points at this machine
+    or a container-internal name (no dot: `db`, `postgres`). Week 2: 13 replayed
+    calls were local development database URLs like postgres:postgres@127.0.0.1."""
+    hosts = [m.group(1) for m in _USERINFO_URL.finditer(line)]
+    return bool(hosts) and all(_LOCAL_HOSTS.match(h) for h in hosts)
+
+
 def scan_secrets(text: str, where: str = "") -> list[Finding]:
     """Two-tier secret scan of one string."""
     findings: list[Finding] = []
@@ -263,16 +336,14 @@ def scan_secrets(text: str, where: str = "") -> list[Finding]:
     with transient_settings({"plugins_used": _STRUCTURAL_PLUGINS}):
         for line in lines:
             for s in ds_scan.scan_line(line):
+                if s.type == "Basic Auth Credentials" and _local_basic_auth(line):
+                    continue
                 findings.append(Finding("secret", s.type, where, _redact(line)))
     findings.extend(scan_modern_keys(text, where))
 
-    if CRED_CONTEXT.search(text):
-        with transient_settings({"plugins_used": _ENTROPY_SETTINGS}):
-            for line in lines:
-                if not CRED_CONTEXT.search(line):
-                    continue
-                for s in ds_scan.scan_line(line):
-                    findings.append(Finding("secret_entropy", s.type, where, _redact(line)))
+    for line in lines:
+        for _value, label in credential_values(line):
+            findings.append(Finding("secret_entropy", label, where, _redact(line)))
 
     return _scrub_excerpts(_dedupe(findings))
 
@@ -298,6 +369,8 @@ def scan_paths(text: str, where: str = "",
     if p is None:
         return []
     name = PurePosixPath(p).name
+    if name.lower().endswith(TEMPLATE_SUFFIXES):
+        return []
     for pattern in denylist:
         bare = pattern.replace("**/", "")
         if fnmatch(p, pattern) or fnmatch(p, bare) or fnmatch(name, bare):
@@ -385,6 +458,11 @@ def redact_text(text: str) -> str:
                     value = getattr(s, "secret_value", None)
                     if value and len(str(value)) >= 12:
                         replacements[str(value)] = "<redacted:high-entropy>"
+
+    # Whatever the entropy tier flagged must not reach the log either.
+    for line in lines:
+        for value, _label in credential_values(line):
+            replacements[value] = "<redacted:high-entropy>"
 
     out = text
     # Longest first, so a secret containing another match is replaced whole.

@@ -26,18 +26,18 @@ from typing import Any
 
 #: Bump on any change to detection logic (see module docstring). Format:
 #: YYYY.MM.N - the date of the change plus a counter.
-DETECTOR_VERSION = "2026.10.3"
+DETECTOR_VERSION = "2026.10.4"
 
 #: The fingerprint of the detection code DETECTOR_VERSION describes. When the
 #: fingerprint test fails, bump DETECTOR_VERSION and paste the new value here.
-DETECTOR_FINGERPRINT = "4314997db1d9"
+DETECTOR_FINGERPRINT = "f7abcbb2f0f5"
 
 #: Modules whose code decides verdicts. Comments, docstrings and formatting
 #: don't count (the fingerprint is taken over the syntax tree); code does.
 DETECTION_MODULES: tuple[str, ...] = (
     "scanner", "risk", "taint", "sinks", "propagation", "classify", "hooks",
     "middleware", "policy", "scope", "financial", "behavior", "quarantine",
-    "pinning", "identity", "locks", "decision",
+    "pinning", "identity", "locks", "decision", "shellcmd",
 )
 
 

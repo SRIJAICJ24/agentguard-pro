@@ -276,6 +276,10 @@ class HooksConfig:
     # Results of these Claude Code tools are UNTRUSTED taint sources. MCP tools
     # are classified by their inner name against `taint.untrusted_tools`.
     untrusted_tools: list[str] = field(default_factory=lambda: ["WebFetch", "WebSearch"])
+    # A recursive delete whose every target is provably inside the system temp
+    # directory is logged (`hook:delete_in_temp`) instead of sent to REVIEW. Week 1:
+    # all 14 destructive-command flags were Claude clearing its own scratchpad.
+    temp_deletes_ok: bool = True
 
 
 def _hooks_from_dict(data: dict[str, Any]) -> HooksConfig:
@@ -303,6 +307,7 @@ def _hooks_from_dict(data: dict[str, Any]) -> HooksConfig:
         h.self_protection = bool(sp)
     if data.get("untrusted_tools") is not None:
         h.untrusted_tools = _as_list(data.get("untrusted_tools"))
+    h.temp_deletes_ok = bool(data.get("temp_deletes_ok", h.temp_deletes_ok))
     # Fail at load time, not on the first tool call.
     for pattern in [*(p for ps in h.bash.values() for p in ps), *h.self_protect_commands]:
         try:

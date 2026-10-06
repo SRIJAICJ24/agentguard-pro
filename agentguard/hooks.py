@@ -76,6 +76,7 @@ from agentguard.scanner import (
     scan_paths,
 )
 from agentguard.scope import ScopeStore
+from agentguard.shellcmd import only_mentioned, only_temp_deletes
 from agentguard.sinks import SinkClassifier
 from agentguard.taint import UNTRUSTED, TaintMap, TaintRegistry
 from agentguard.workspace import workspace_label
@@ -95,6 +96,10 @@ WRITE_TOOLS: dict[str, tuple[str, ...]] = {
     "NotebookEdit": ("new_source",),
 }
 READ_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "NotebookRead"})
+#: Built-in tools whose input only goes to the user's own screen. Without this,
+#: SendUserFile matched the `*send*` exfiltration glob.
+USER_FACING_TOOLS = frozenset({"SendUserFile", "AskUserQuestion", "ExitPlanMode",
+                               "EnterPlanMode", "TodoWrite", "TaskCreate", "TaskUpdate"})
 LIST_TOOLS = frozenset({"Glob", "LS"})
 
 _MCP_NAME = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$")
@@ -105,6 +110,9 @@ _SCP_HOST = re.compile(r"(?:^|\s)(?:[\w.-]+@)?([\w.-]+\.[a-z]{2,}|\d{1,3}(?:\.\d
 # netcat-style `nc host port`
 _NC_HOST = re.compile(r"\b(?:nc|ncat|netcat|telnet)\s+(?:-\S+\s+)*([\w.-]+)\s+\d+", re.IGNORECASE)
 _TOKEN = re.compile(r'"[^"]*"|\'[^\']*\'|[^\s|&;()<>]+')
+# A regex escape (`\.env`, `\\.env\\.`, `a\|b`) marks a search pattern, not a
+# path. A Windows path's `\.` follows a name character (`C:\proj\.env`).
+_REGEX_TOKEN = re.compile(r"(?:^|[^A-Za-z0-9_:~])\\\.|\\\||\^\\|\\[sdwb]")
 
 
 def _now() -> float:
@@ -337,6 +345,9 @@ class MappedCall:
     # Tools that only list names (Glob, LS): a credential *path* in their input
     # isn't a read of the credential, so `credential_files` doesn't apply.
     lists_only: bool = False
+    # Shell calls: credential paths were judged token by token (read or only
+    # named), so the whole-command path scan must not count them again.
+    paths_by_token: bool = False
 
 
 def _tokens(command: str) -> list[str]:
@@ -440,6 +451,11 @@ class HookEngine:
         if tool in SHELL_TOOLS:
             return self._map_shell(tool, str(tool_input.get("command", "")))
 
+        if tool in USER_FACING_TOOLS:
+            # Shown to the user, not sent anywhere: never a sink, and naming a
+            # credential path in a question isn't reading it.
+            return MappedCall(tool, tool, dict(tool_input), [TIER_ORDINARY], lists_only=True)
+
         if tool in WRITE_TOOLS:
             args: dict[str, Any] = {}
             for key in ("file_path", "notebook_path", *WRITE_TOOLS[tool]):
@@ -472,12 +488,27 @@ class HookEngine:
     def _map_shell(self, tool: str, command: str) -> MappedCall:
         hooks = self.policy.hooks
         call = MappedCall(tool, tool, {"command": command}, [TIER_ORDINARY])
+        call.paths_by_token = True
 
         # Credential paths anywhere in the command line, token by token - the
         # whole command never "looks like a path", so the argument-level path
-        # scan alone would miss `cat ~/.ssh/id_rsa`.
+        # scan alone would miss `cat ~/.ssh/id_rsa`. A path that is only named
+        # (`test -f .env`, `docker compose --env-file .env build`) doesn't put the
+        # file's contents in front of the agent: logged, not counted as a read.
+        mentioned: list[str] = []
         for tok in _tokens(command):
-            call.findings.extend(scan_paths(tok, "command", self._denylist))
+            if _REGEX_TOKEN.search(tok):
+                continue                    # grep "\.env": a pattern, not a path
+            found = scan_paths(tok, "command", self._denylist)
+            if found and only_mentioned(command, tok):
+                mentioned.append(tok)
+                continue
+            call.findings.extend(found)
+        if mentioned:
+            call.signals.append(Signal(
+                "credpath:referenced", 0.0,
+                f"credential path named but not read: {', '.join(mentioned[:3])}",
+            ))
 
         def matches(kind: str) -> list[str]:
             return [p for p in hooks.bash.get(kind, [])
@@ -498,7 +529,13 @@ class HookEngine:
         if matches("propagation"):
             call.tiers.append(TIER_PROPAGATION)
         destructive = matches("destructive")
-        if destructive:
+        starts = [m.start() for p in destructive for m in re.finditer(p, command, re.IGNORECASE)]
+        if destructive and hooks.temp_deletes_ok and only_temp_deletes(command, starts):
+            call.signals.append(Signal(
+                "hook:delete_in_temp", 0.0,
+                "recursive delete; every target is inside a temp directory",
+            ))
+        elif destructive:
             call.signals.append(Signal(
                 "hook:destructive_command", 0.0,
                 f"recursive delete or disk-level command (pattern {destructive[0]!r})",
@@ -561,6 +598,10 @@ class HookEngine:
 
         # --- evidence ------------------------------------------------------
         scan = scan_arguments(call.arguments, self._denylist)
+        if call.paths_by_token or call.tool in USER_FACING_TOOLS:
+            # user-facing tools: a path in a question to the user isn't a file access
+            scan.findings = [f for f in scan.findings if not (
+                f.kind == "path" and (f.where == "command" or call.tool in USER_FACING_TOOLS))]
         known = {(f.kind, f.label, f.where) for f in scan.findings}
         for f in call.findings:
             if (f.kind, f.label, f.where) not in known:
