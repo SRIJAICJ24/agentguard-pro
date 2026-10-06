@@ -403,10 +403,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
 
 def cmd_simulate(args: argparse.Namespace) -> int:
-    import sys as _sys
-
-    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
-    from mock_mcp_server import mcp as mock_upstream    # noqa: PLC0415
+    from agentguard.mock_upstream import mcp as mock_upstream
 
     from agentguard.gateway import build_gateway
     from agentguard.simulator import RedTeamSimulator
@@ -441,6 +438,22 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     print(_c("\n  score = mean(detection, benign-clean), so blocking everything "
              "cannot inflate it.", "dim"))
     return 0 if report.score >= args.min_score else 1
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    from agentguard import replay
+
+    root = Path(args.projects_dir) if args.projects_dir else replay.projects_dir()
+    if not root.is_dir():
+        print(f"no Claude Code transcripts found at {root}", file=sys.stderr)
+        return 1
+    result = replay.run(load_policy(args.policy), root, skip=tuple(args.skip or ()),
+                        only=tuple(args.project or ()), examples=args.examples)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(replay.render(result, root))
+    return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -773,6 +786,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--include-dev", action="store_true",
                    help="also count hook traffic from the policy's dev_workspaces")
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser(
+        "replay",
+        help="run your past Claude Code sessions through the detector (read-only)",
+    )
+    s.add_argument("--projects-dir", default=None,
+                   help="transcript folder (default: $CLAUDE_CONFIG_DIR/projects or "
+                        "~/.claude/projects)")
+    s.add_argument("--project", action="append",
+                   help="only this project folder (repeatable)")
+    s.add_argument("--skip", action="append", help="skip this project folder (repeatable)")
+    s.add_argument("--examples", type=int, default=0,
+                   help="show this many flagged calls, redacted")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_replay)
 
     s = sub.add_parser("scope", help="declare which tools a session's task needs")
     ss = s.add_subparsers(dest="scope_cmd", required=True)
