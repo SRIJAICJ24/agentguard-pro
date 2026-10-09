@@ -348,6 +348,9 @@ class MappedCall:
     # Shell calls: credential paths were judged token by token (read or only
     # named), so the whole-command path scan must not count them again.
     paths_by_token: bool = False
+    # A shell command fetching from a host outside the allowlist: its output is
+    # web content, an untrusted taint source (week 3).
+    untrusted_result: bool = False
 
 
 def _tokens(command: str) -> list[str]:
@@ -360,6 +363,14 @@ def _tokens(command: str) -> list[str]:
         if tok:
             out.append(tok)
     return out
+
+
+_URL_ADDRESS = re.compile(r"(?i)\b(?:https?|ftp|sftp|wss?)://[^\s'\"<>?#]*(\?[^\s'\"<>#]*)?")
+
+
+def _without_url_paths(text: str) -> str:
+    """URLs reduced to their query strings - the part of an address that carries data."""
+    return _URL_ADDRESS.sub(lambda m: f" {m.group(1)} " if m.group(1) else " ", text)
 
 
 def _hosts(command: str) -> list[str]:
@@ -520,6 +531,7 @@ class HookEngine:
             unlisted = [h for h in hosts if not _host_allowed(h, allowed)]
             if unlisted or not hosts:
                 call.tiers.append(TIER_EXFILTRATION)
+                call.untrusted_result = hooks.network_results_untrusted
             if unlisted:
                 call.signals.append(Signal(
                     "hook:egress_unlisted_host", W_UNKNOWN_DESTINATION,
@@ -610,7 +622,14 @@ class HookEngine:
 
         primary = next((t for t in (TIER_PERSISTENCE, TIER_EXFILTRATION) if t in call.tiers),
                        TIER_ORDINARY)
-        assessment = self.sinks.assess_tier(primary, call.arguments, taint)
+        taint_args = call.arguments
+        if call.tool in SHELL_TOOLS or call.tool == "WebFetch":
+            # The address a request goes to isn't data leaving: following a link
+            # found in a fetched page is browsing. Bodies, headers and query
+            # strings still count (week 3).
+            taint_args = {k: _without_url_paths(v) if isinstance(v, str) else v
+                          for k, v in call.arguments.items()}
+        assessment = self.sinks.assess_tier(primary, taint_args, taint)
         extra.extend(assessment.signals)
         if assessment.verdict_floor is not Verdict.ALLOW:
             floors.append((assessment.verdict_floor, f"sink tier: {primary}"))
@@ -811,8 +830,12 @@ class HookEngine:
         return {}
 
     def _untrusted(self, call: MappedCall) -> bool:
+        if call.untrusted_result:
+            return True
         if call.mcp_server is not None:
-            return self.policy.is_untrusted_source(call.policy_tool)
+            return (self.policy.is_untrusted_source(call.policy_tool)
+                    or any(fnmatch(call.policy_tool, p)
+                           for p in self.policy.hooks.untrusted_mcp_tools))
         return any(fnmatch(call.tool, p) for p in self.policy.hooks.untrusted_tools)
 
     def _find_ask(self, tool_use_id: str) -> int | None:

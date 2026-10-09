@@ -280,6 +280,17 @@ class HooksConfig:
     # directory is logged (`hook:delete_in_temp`) instead of sent to REVIEW. Week 1:
     # all 14 destructive-command flags were Claude clearing its own scratchpad.
     temp_deletes_ok: bool = True
+    # Week 3: web content reached the agent mostly through the browser pane and
+    # shell fetches, not WebFetch/WebSearch (replay: ~520 of ~580 page reads), and
+    # none of it was tainted. The output of a Bash/PowerShell network command to a
+    # host outside the egress allowlist is untrusted...
+    network_results_untrusted: bool = True
+    # ...and so are results of MCP tools that return page text, matched against the
+    # inner tool name, on top of `taint.untrusted_tools`. New keys, so a policy
+    # file written before week 3 gets these defaults.
+    untrusted_mcp_tools: list[str] = field(default_factory=lambda: [
+        "get_page_text", "read_page", "*page_text*", "*scrape*", "*crawl*", "*read_url*",
+    ])
 
 
 def _hooks_from_dict(data: dict[str, Any]) -> HooksConfig:
@@ -308,6 +319,10 @@ def _hooks_from_dict(data: dict[str, Any]) -> HooksConfig:
     if data.get("untrusted_tools") is not None:
         h.untrusted_tools = _as_list(data.get("untrusted_tools"))
     h.temp_deletes_ok = bool(data.get("temp_deletes_ok", h.temp_deletes_ok))
+    h.network_results_untrusted = bool(data.get("network_results_untrusted",
+                                                h.network_results_untrusted))
+    if data.get("untrusted_mcp_tools") is not None:
+        h.untrusted_mcp_tools = _as_list(data.get("untrusted_mcp_tools"))
     # Fail at load time, not on the first tool call.
     for pattern in [*(p for ps in h.bash.values() for p in ps), *h.self_protect_commands]:
         try:

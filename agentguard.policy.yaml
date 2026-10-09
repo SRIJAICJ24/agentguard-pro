@@ -185,6 +185,12 @@ hooks:
   # hook:delete_in_temp instead of going to REVIEW. Unknown variables, `..`,
   # the temp root itself and anything outside temp still go to REVIEW.
   temp_deletes_ok: true
+  # Taint sources beyond untrusted_tools (week 3). The output of a Bash or
+  # PowerShell network command to a host outside the allowlist is untrusted,
+  # and so is the result of an MCP tool returning page text (inner tool name).
+  network_results_untrusted: true
+  untrusted_mcp_tools: ["get_page_text", "read_page", "*page_text*", "*scrape*",
+                        "*crawl*", "*read_url*"]
   # Writes, edits and shell commands touching AgentGuard's own config, policy,
   # audit database, the Claude Code settings that register these hooks, or its
   # daemon -> REVIEW, and deny in enforce mode. This raises the bar; it does not

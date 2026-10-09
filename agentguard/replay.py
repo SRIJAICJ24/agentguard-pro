@@ -50,6 +50,9 @@ class ReplayResult:
     hard: Counter = field(default_factory=Counter)
     by_project: dict[str, Counter] = field(default_factory=dict)
     examples: list[ReplayExample] = field(default_factory=list)
+    # PostToolUse bookkeeping - what `report` counts as "taint events" -
+    # by "signal tool", e.g. "taint:recorded WebFetch".
+    taint: Counter = field(default_factory=Counter)
 
     @property
     def flagged(self) -> int:
@@ -61,6 +64,7 @@ class ReplayResult:
             "verdicts": dict(self.verdicts), "hard_enforced": dict(self.hard),
             "signals": dict(self.signals.most_common()),
             "by_project": {p: dict(c) for p, c in self.by_project.items()},
+            "taint_events": sum(self.taint.values()), "taint": dict(self.taint),
             "examples": [e.__dict__ for e in self.examples],
         }
 
@@ -142,9 +146,25 @@ def run(policy: Any, root: Path | None = None, *, skip: tuple[str, ...] = (),
                             project=scrub(project.name, names), tool=str(payload["tool_name"]),
                             verdict=verdict, signals=list(event["signals"]),
                             excerpt=scrub(raw[:400], names)[:200]))
+        result.taint.update(_taint_events(work / "replay.db"))
         return result
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _taint_events(db: Path) -> Counter:
+    from agentguard.db import connect
+
+    out: Counter = Counter()
+    if not db.exists():
+        return out
+    for row in connect(str(db)).execute(
+            "SELECT tool, signals FROM audit WHERE stage = 'TOOL_RESULT'").fetchall():
+        names = json.loads(row["signals"] or "[]")
+        for sig in names:
+            name = sig.get("name") if isinstance(sig, dict) else str(sig)
+            out[f"{name} {row['tool']}"] += 1
+    return out
 
 
 def render(result: ReplayResult, root: Path) -> str:
@@ -165,6 +185,8 @@ def render(result: ReplayResult, root: Path) -> str:
     if shown:
         lines += ["", "  signals (a call can carry several; weight-0 ones are logged only):"]
         lines += [f"    {s:<44} {n}" for s, n in shown[:20]]
+    lines += ["", f"  taint events (untrusted results recorded): {sum(result.taint.values())}"]
+    lines += [f"    {k:<44} {n}" for k, n in result.taint.most_common(10)]
     if result.examples:
         lines += ["", "  flagged examples (redacted):"]
         for e in result.examples:

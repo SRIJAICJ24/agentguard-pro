@@ -110,3 +110,15 @@ def test_replay_cli(projects, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["calls"] == 6
     assert main(["replay", "--projects-dir", str(root / "missing")]) == 1
+
+
+def test_replay_counts_taint_events_like_report(projects):
+    """report's "taint events" are TOOL_RESULT rows; replay must show the same
+    count, so "0 taint events" in a real week can be checked against history."""
+    from agentguard import replay
+
+    root, _gh = projects
+    res = replay.run(_policy(), root)
+    assert res.taint == {"taint:recorded WebFetch": 1}
+    assert res.to_dict()["taint_events"] == 1
+    assert "taint events (untrusted results recorded): 1" in replay.render(res, root)
