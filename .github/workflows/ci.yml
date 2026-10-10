@@ -17,17 +17,22 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
     env:
-      # Tests and `simulate` write state. Keep it inside the runner's temp dir,
-      # never in a real ~/.agentguard or ~/.claude.
-      AGENTGUARD_HOME: ${{ runner.temp }}/agentguard-home
-      CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config
       PYTHONUTF8: "1"
     steps:
+      # Tests and `simulate` write state. Keep it inside the runner's temp dir,
+      # never in a real ~/.agentguard or ~/.claude. (The `runner` context isn't
+      # available in job-level env, so this is set from a step.)
+      - name: State in the runner's temp dir
+        shell: bash
+        run: |
+          echo "AGENTGUARD_HOME=$RUNNER_TEMP/agentguard-home" >> "$GITHUB_ENV"
+          echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: python -m pip install -e ".[dev]"
       - name: Tests
