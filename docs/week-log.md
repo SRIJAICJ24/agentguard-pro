@@ -12,7 +12,8 @@ in them came from the same code and the same rules, so:
 | Tag | Detector version | Policy hash | Live policy file | Install | Start date (UTC) | End date |
 |---|---|---|---|---|---|---|
 | `week1` | `2026.10.3` | `p-78e342c112` | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week1`, non-editable, venv `D:/agentguard-week` | **2026-10-03** (frozen 2026-10-02; the daemon first answered from the venv at about 04:40 UTC, first hook row is audit #14 at 04:41 UTC) | ends when `week2` is installed |
-| `week2` | `2026.10.4` | `p-68f143cdb5` (the week1 live policy file, unchanged, hashes to this under week2 code: the new `temp_deletes_ok` setting defaults to true) | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week2`, non-editable, same venv | not installed yet: starts when the user reinstalls | — |
+| `week2` | `2026.10.4` | `p-68f143cdb5` (the week1 live policy file, unchanged, hashes to this under week2 code: the new `temp_deletes_ok` setting defaults to true) | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week2`, non-editable, same venv | never installed: the live daemon still ran week1 code on 2026-10-10 (its health reply carries no version fields) | superseded by `week3` |
+| `week3` | `2026.10.5` | `p-f27874a375` (the unchanged live file and the shipped file both hash to this under week3 code) | same live file | wheel `agentguard-0.4.0` from `week3`, non-editable, same venv | starts when the user installs it | — |
 
 ## Why week2 exists: week 1 accuracy, measured
 
@@ -94,3 +95,31 @@ the second `p-78e342c112`. Every audit row also records `detector_version` and
 
 None of the providers documents a body length, so bodies are matched by character class
 with a minimum length; redaction always removes the whole token.
+
+## Why week3 exists: taint events were 0
+
+The real report for 2026-10-03 to 2026-10-06 showed "taint events: 0". Checked:
+
+- Claude Code user settings register both PreToolUse and PostToolUse hooks, matcher `*`,
+  for the AgentGuard HTTP endpoint. No project-level settings override them.
+- No WebFetch or WebSearch call happened in that window: the last ones were on 2026-10-02.
+  So "0" was correct for the tools that counted.
+- In the whole history, `agentguard replay` recorded taint for every WebFetch (14) and
+  WebSearch (15) result. The pipeline worked for those two tools.
+- **The gap:** most web content reached the agent another way. In the history that was the
+  browser pane (`get_page_text` 74 calls, `read_page` 43) and shell fetches
+  (`curl`/`wget`/`Invoke-WebRequest`/`git clone`, 182), against 61 WebFetch/WebSearch
+  calls. None of it was tainted. 8 of those shell fetches fell inside the window.
+- Third-party file reads (`node_modules`, `site-packages`, cloned repositories, Downloads):
+  0 in the history, so there was nothing to build or tune on (documented as a limitation).
+
+Fix (detector 2026.10.5): shell-fetch output to a host outside the allowlist, and MCP
+tools that return page text, are untrusted sources. For the exfiltration check, a URL
+counts only by its query string. Replay of 7,341 calls: taint events 47 -> 217, flagged
+82 -> 88 (6 new false alarms, all shell output that mixed the agent's own `echo` text
+with fetched data), hard blocks 30 -> 30.
+
+Also in week3, unrelated to detection: the detector fingerprint no longer depends on the
+Python version (`ast.dump` changed in 3.13). Same code, same version number, new
+fingerprint `1d80675375f3`. Both pre-existing policy hashes change only because the
+hooks settings gained two fields.
