@@ -17,6 +17,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def child_pythonpath(*first: str | os.PathLike[str], drop: Path | None = None) -> str:
+    """PYTHONPATH for a child process: `first`, then the parent's own import path
+    (minus `drop`), so dependencies stay importable however they were installed -
+    a venv, the user site under a temporary HOME, or PYTHONPATH itself."""
+    keep = []
+    for p in sys.path:
+        if not p or not os.path.isdir(p):
+            continue
+        if drop is not None and Path(p).resolve() == drop.resolve():
+            continue
+        keep.append(p)
+    return os.pathsep.join([*(str(f) for f in first), *keep])
+
+
 def test_simulate_runs_with_only_the_package_installed():
     work = Path(tempfile.mkdtemp(prefix="ag-pkg-"))
     try:
@@ -25,7 +39,7 @@ def test_simulate_runs_with_only_the_package_installed():
                         ignore=shutil.ignore_patterns("__pycache__"))
         home = work / "home"
         home.mkdir()
-        env = {**os.environ, "PYTHONPATH": str(site), "AGENTGUARD_HOME": str(home),
+        env = {**os.environ, "PYTHONPATH": child_pythonpath(site, drop=ROOT), "AGENTGUARD_HOME": str(home),
                "HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / "claude")}
         out = subprocess.run(
             [sys.executable, "-m", "agentguard.cli", "simulate", "--db", str(home / "sim.db"),

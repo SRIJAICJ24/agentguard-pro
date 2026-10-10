@@ -30,7 +30,7 @@ DETECTOR_VERSION = "2026.10.5"
 
 #: The fingerprint of the detection code DETECTOR_VERSION describes. When the
 #: fingerprint test fails, bump DETECTOR_VERSION and paste the new value here.
-DETECTOR_FINGERPRINT = "710c0de13455"
+DETECTOR_FINGERPRINT = "1d80675375f3"
 
 #: Modules whose code decides verdicts. Comments, docstrings and formatting
 #: don't count (the fingerprint is taken over the syntax tree); code does.
@@ -52,6 +52,27 @@ def _strip_docstrings(tree: ast.AST) -> ast.AST:
     return tree
 
 
+def _canonical(node: Any) -> str:
+    """A syntax-tree dump that is the same on every supported Python version.
+
+    `ast.dump` is not: Python 3.13 leaves out fields that are None or empty lists,
+    and 3.12 added `type_params`, so the same code fingerprinted differently on
+    3.12 and 3.13 (found on the first Linux run). Empty fields are skipped here
+    on every version.
+    """
+    if isinstance(node, ast.AST):
+        fields = []
+        for name in node._fields:
+            value = getattr(node, name, None)
+            if value is None or (isinstance(value, list) and not value):
+                continue
+            fields.append(f"{name}={_canonical(value)}")
+        return f"{type(node).__name__}({','.join(fields)})"
+    if isinstance(node, list):
+        return "[" + ",".join(_canonical(item) for item in node) + "]"
+    return repr(node)
+
+
 def detector_fingerprint(package_dir: Path | None = None) -> str:
     """Hash of the detection modules' syntax trees (comments/docstrings ignored)."""
     base = package_dir or Path(__file__).resolve().parent
@@ -60,7 +81,7 @@ def detector_fingerprint(package_dir: Path | None = None) -> str:
         source = (base / f"{name}.py").read_text(encoding="utf-8")
         tree = _strip_docstrings(ast.parse(source))
         digest.update(name.encode())
-        digest.update(ast.dump(tree, include_attributes=False).encode())
+        digest.update(_canonical(tree).encode())
     return digest.hexdigest()[:12]
 
 

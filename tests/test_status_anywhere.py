@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from test_packaging import child_pythonpath
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -34,7 +36,8 @@ def installed():
     policy.write_text("enforcement: false\ndev_workspaces: [devproj]\n", encoding="utf-8")
     cfg.save(cfg.Config(policy_file=str(policy)), home / "agentguard.json")
     env = {**os.environ, "AGENTGUARD_HOME": str(home), "HOME": str(home),
-           "CLAUDE_CONFIG_DIR": str(work / "claude"), "PYTHONPATH": str(ROOT)}
+           "CLAUDE_CONFIG_DIR": str(work / "claude"),
+           "PYTHONPATH": child_pythonpath(ROOT)}
     yield {"work": work, "home": home, "cwd": elsewhere, "policy": policy, "env": env}
     shutil.rmtree(work, ignore_errors=True)
 

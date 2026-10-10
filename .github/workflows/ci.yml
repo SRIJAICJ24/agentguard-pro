@@ -23,8 +23,8 @@ jobs:
       CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -39,8 +39,8 @@ jobs:
     name: Wheel works without the source tree
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Build and install the wheel into a clean venv
@@ -57,3 +57,5 @@ jobs:
           "$RUNNER_TEMP/venv/bin/agentguard" --version
           "$RUNNER_TEMP/venv/bin/agentguard" simulate --min-score 100 --db "$RUNNER_TEMP/sim.db"
           "$RUNNER_TEMP/venv/bin/agentguard" scan "the weather is nice in paris today"
+          "$RUNNER_TEMP/venv/bin/agentguard" demo
+          "$RUNNER_TEMP/venv/bin/agentguard" status
