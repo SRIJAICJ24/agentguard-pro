@@ -498,12 +498,24 @@ def cmd_replay(args: argparse.Namespace) -> int:
     if not root.is_dir():
         print(f"no Claude Code transcripts found at {root}", file=sys.stderr)
         return 1
-    result = replay.run(load_policy(args.policy), root, skip=tuple(args.skip or ()),
+    from agentguard.config import resolve_policy_path
+
+    path, why = resolve_policy_path(args.policy)
+    if path is None:
+        # Quickstart runs replay before `onboard`: measure the setup onboard would
+        # install (hard rules on), not the in-code defaults (hard rules off).
+        from agentguard.onboarding import starter_policy
+
+        policy, used = starter_policy(), "starter policy (no policy file found)"
+    else:
+        policy, used = load_policy(args.policy), f"{path} ({why})"
+    result = replay.run(policy, root, skip=tuple(args.skip or ()),
                         only=tuple(args.project or ()), examples=args.examples)
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2))
+        print(json.dumps({**result.to_dict(), "policy": used}, indent=2))
     else:
         print(replay.render(result, root))
+        print(f"  policy: {used}")
     return 0
 
 

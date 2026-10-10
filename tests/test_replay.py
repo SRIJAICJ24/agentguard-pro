@@ -122,3 +122,26 @@ def test_replay_counts_taint_events_like_report(projects):
     assert res.taint == {"taint:recorded WebFetch": 1}
     assert res.to_dict()["taint_events"] == 1
     assert "taint events (untrusted results recorded): 1" in replay.render(res, root)
+
+
+def test_replay_without_a_policy_measures_what_onboard_would_install(projects, monkeypatch, capsys):
+    """Quickstart step 1 runs replay before `onboard`, from any folder. With no
+    policy file it must use the starter policy onboard writes (hard rules on), not
+    the in-code defaults (hard rules off) - otherwise it measures a setup the user
+    will never run."""
+    import tempfile as _tf
+
+    from agentguard.cli import main
+
+    root, _gh = projects
+    home, elsewhere = Path(_tf.mkdtemp(prefix="ag-h-")), Path(_tf.mkdtemp(prefix="ag-cwd-"))
+    try:
+        monkeypatch.setenv("AGENTGUARD_HOME", str(home))
+        monkeypatch.chdir(elsewhere)
+        assert main(["replay", "--projects-dir", str(root), "--json"]) == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["hard_enforced"] == {"credential_files": 1}
+        assert out["policy"] == "starter policy (no policy file found)"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(elsewhere, ignore_errors=True)

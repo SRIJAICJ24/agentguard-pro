@@ -23,7 +23,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from agentguard import config as cfg
 from agentguard.config import MODE_ENFORCE, MODE_OBSERVE, Config
@@ -154,6 +154,16 @@ quarantine:
     default: 24    # web-sourced content expires after a day
     reviewed: 0    # 0 = indefinite but permanently flagged
 """
+
+
+def starter_policy(enforcement: bool = False) -> Any:
+    """The Policy that `onboard` would write, without writing it."""
+    import yaml
+
+    from agentguard.policy import from_dict
+
+    text = STARTER_POLICY.format(enforcement="true" if enforcement else "false")
+    return from_dict(yaml.safe_load(text) or {})
 
 
 def write_starter_policy(directory: Path | None = None, *,
