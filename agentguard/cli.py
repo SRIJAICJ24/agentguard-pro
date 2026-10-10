@@ -11,12 +11,18 @@ from typing import Any
 from agentguard import __version__
 
 
-def load_policy(*args: Any, **kwargs: Any) -> Any:
-    """Imported lazily: `agentguard hook` runs once per Claude Code tool call and
-    must load only the standard library, and the policy module pulls in PyYAML."""
-    from agentguard.policy import load
+def load_policy(path: Any = None) -> Any:
+    """The policy a command should use: `--policy`, else the one recorded in the
+    installation config (what the daemon runs with), else one found from the
+    current folder (see config.resolve_policy_path).
 
-    return load(*args, **kwargs)
+    Imported lazily: `agentguard hook` runs once per Claude Code tool call and
+    must load only the standard library, and the policy module pulls in PyYAML."""
+    from agentguard.config import resolve_policy_path
+    from agentguard.policy import Policy, load
+
+    resolved, _why = resolve_policy_path(path)
+    return load(resolved) if resolved is not None else Policy()
 
 # --- small terminal helpers ------------------------------------------------
 _COLORS = {"ALLOW": "\033[32m", "REVIEW": "\033[33m", "BLOCK": "\033[31m",
@@ -116,10 +122,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     from agentguard import config as cfg
     from agentguard.db import default_db_path
 
+    import agentguard
+    from agentguard import daemonctl
+    from agentguard.versions import DETECTOR_VERSION, policy_version
+
+    policy_path, policy_why = cfg.resolve_policy_path(args.policy)
     policy = load_policy(args.policy)
     s = audit.stats()
     intact, broken = audit.verify_chain()
+    mine = {"version": __version__, "detector_version": DETECTOR_VERSION,
+            "policy_version": policy_version(policy)}
     print(_c(f"AgentGuard {__version__}", "bold"))
+    print(f"  package         : {Path(agentguard.__file__).resolve().parent}")
+    print(f"  detector        : {DETECTOR_VERSION}")
+    print(f"  policy          : {policy_path or '<built-in defaults>'}")
+    print(f"                    ({policy_why}; hash {mine['policy_version']})")
 
     # Installation config, when onboarding has been run.
     if cfg.exists():
@@ -136,9 +153,25 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  config          : {_c('not set up', 'REVIEW')} "
               f"(run `agentguard onboard`)")
 
+    # Same precedence the daemon uses (config mode over the policy's enforcement:).
+    enforced, mode_why = resolve_enforcement(argparse.Namespace())
+    if enforced is None:
+        enforced = bool(policy.enforcement)
+        mode_why = "enforcement: in the policy file" if policy_path else "built-in default"
     print(f"  mode            : "
-          f"{_c('ENFORCING', 'BLOCK') if policy.enforcement else _c('OBSERVE (log only)', 'REVIEW')}")
-    print(f"  policy          : {policy.source_path or '<defaults>'}")
+          f"{_c('ENFORCING', 'BLOCK') if enforced else _c('OBSERVE (log only)', 'REVIEW')}"
+          f"  ({mode_why})")
+    health = daemonctl.status()
+    if health.running:
+        reported = daemonctl.probe(health.port) or {}
+        print(f"  daemon          : running, {health.mode} mode, "
+              f"{reported.get('version', '?')} / detector "
+              f"{reported.get('detector_version', '? (daemon too old to say)')} / "
+              f"{reported.get('policy_version', '?')}")
+        for line in _version_mismatches(mine, reported):
+            print(_c(f"                    differs from this CLI - {line}", "REVIEW"))
+    else:
+        print(f"  daemon          : {_c('not running', 'REVIEW')} ({health.detail})")
     print(f"  database        : {default_db_path()}")
     print(f"  audit chain     : "
           f"{_c('intact', 'ALLOW') if intact else _c(f'BROKEN at {broken}', 'BLOCK')}")
@@ -160,6 +193,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(_c("                    a day with 0 events may be an outage - hooks fail "
                  "open, so nothing breaks visibly when the daemon is down", "REVIEW"))
     return 0
+
+
+def _version_mismatches(mine: dict[str, Any], daemon: dict[str, Any]) -> list[str]:
+    """Where the running daemon's versions differ from this CLI's. A daemon too old
+    to report a field says nothing about it."""
+    return [f"{key}: this CLI {mine[key]}, daemon {daemon[key]}"
+            for key in ("version", "detector_version", "policy_version")
+            if key in daemon and daemon[key] != mine.get(key)]
 
 
 def _ago(hours: float) -> str:

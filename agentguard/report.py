@@ -247,9 +247,12 @@ def _dev_workspaces(explicit: list[str] | None) -> list[str]:
     if explicit is not None:
         return list(explicit)
     try:
-        from agentguard.policy import load
+        from agentguard.config import resolve_policy_path
+        from agentguard.policy import Policy, load
 
-        return list(load().dev_workspaces)
+        # The installation's policy, not whatever is in the current folder.
+        path, _why = resolve_policy_path()
+        return list((load(path) if path is not None else Policy()).dev_workspaces)
     except Exception:                                   # noqa: BLE001
         return []
 

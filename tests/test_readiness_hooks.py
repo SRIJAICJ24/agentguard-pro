@@ -508,7 +508,10 @@ def test_http_endpoint_answers_in_the_documented_format(db_path):
         assert r.status_code == 400
 
         health = client.get("/hooks/health").json()
-        assert health == {"ok": True, "service": "agentguard", "mode": "enforce"}
+        assert {k: health[k] for k in ("ok", "service", "mode")} == \
+            {"ok": True, "service": "agentguard", "mode": "enforce"}
+        # added for `status` (pre-launch pass): versions of the running daemon
+        assert {"version", "detector_version", "policy_version", "policy"} <= set(health)
 
 
 def test_http_endpoint_fails_open_on_an_internal_error(db_path, monkeypatch):

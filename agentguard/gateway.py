@@ -130,8 +130,17 @@ def attach_hook_routes(server: FastMCP, engine: Any) -> None:
 
     @server.custom_route(HOOK_HEALTH_PATH, methods=["GET"])
     async def hook_health(request: Request) -> Response:
+        from agentguard import __version__
+        from agentguard.versions import DETECTOR_VERSION
+
+        # Versions too, so `status` can say when the running daemon is older or
+        # newer than the CLI asking (they come from different installs easily).
+        source = getattr(engine.policy, "source_path", None)
         return JSONResponse({"ok": True, "service": "agentguard",
-                             "mode": "enforce" if engine.enforcing else "observe"})
+                             "mode": "enforce" if engine.enforcing else "observe",
+                             "version": __version__, "detector_version": DETECTOR_VERSION,
+                             "policy_version": engine.policy_version,
+                             "policy": str(source) if source else None})
 
 
 def run_gateway(

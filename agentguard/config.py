@@ -160,6 +160,32 @@ def load(path: str | Path | None = None) -> Config:
     return config
 
 
+def resolve_policy_path(explicit: str | Path | None = None) -> tuple[Path | None, str]:
+    """Which policy file a command should use, and why.
+
+    Most specific first: `--policy`, then `policy_file` in this installation's
+    config (what the daemon was started with), then an agentguard.policy.yaml
+    found from the current folder upward, then built-in defaults (None). Without
+    the config step, a command run from another folder showed a different policy
+    from the one the daemon enforces.
+    """
+    if explicit:
+        return Path(explicit), "--policy"
+    try:
+        if exists():
+            recorded = load().policy_file
+            if recorded:
+                return Path(recorded), f"policy_file in {config_path()}"
+    except ConfigError:
+        pass
+    from agentguard.policy import find_policy_file
+
+    found = find_policy_file()
+    if found is not None:
+        return found, f"found from {Path.cwd()}"
+    return None, "built-in defaults (no policy file found)"
+
+
 def save(config: Config, path: str | Path | None = None) -> Path:
     """Write the config, creating the home directory if needed."""
     problems = config.validate()
