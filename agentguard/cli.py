@@ -481,6 +481,16 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0 if report.score >= args.min_score else 1
 
 
+def cmd_demo(args: argparse.Namespace) -> int:
+    from agentguard import demo
+
+    result = demo.run(pause=args.pause, keep=args.keep)
+    if args.keep:
+        print(f"\n  (state kept in {args.keep}; "
+              f"AGENTGUARD_HOME={args.keep} agentguard audit --last 10)")
+    return 0 if result.ok else 1
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     from agentguard import replay
 
@@ -827,6 +837,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--include-dev", action="store_true",
                    help="also count hook traffic from the policy's dev_workspaces")
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser(
+        "demo",
+        help="the headline attack in 60 seconds: poisoned page -> memory -> new "
+             "session -> blocked (offline, fake data, temp folder)",
+    )
+    s.add_argument("--pause", type=float, default=0.0,
+                   help="seconds to wait between lines, for screen recordings")
+    s.add_argument("--keep", default=None, metavar="DIR",
+                   help="keep the demo's audit log in DIR instead of deleting it")
+    s.set_defaults(func=cmd_demo)
 
     s = sub.add_parser(
         "replay",

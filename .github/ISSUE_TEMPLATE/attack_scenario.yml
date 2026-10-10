@@ -1,0 +1,50 @@
+name: Attack scenario
+description: A way an agent can be attacked or misuse its tools that AgentGuard should catch (or a variant it misses).
+labels: [attack-scenario]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scenarios become simulator entries (`agentguard simulate`) and regression tests. Use
+        **fake data only**: example.com hosts, made-up keys built at run time, no real targets.
+
+        If the scenario **bypasses a hard-enforced rule** (credential files, secret
+        exfiltration, self-protection), report it privately instead, through Security ->
+        "Report a vulnerability".
+  - type: textarea
+    id: story
+    attributes:
+      label: The attack, step by step
+      description: Where the untrusted content comes from, what the agent does with it, and where it ends up.
+      placeholder: |
+        1. Agent reads a page with a hidden instruction (WebFetch / browser / curl / MCP tool)
+        2. Agent writes ... / saves to memory ... / runs ...
+        3. Data leaves through ...
+    validations:
+      required: true
+  - type: textarea
+    id: calls
+    attributes:
+      label: Tool calls (as Claude Code hook payloads or MCP calls, fake data)
+      render: json
+  - type: dropdown
+    id: today
+    attributes:
+      label: What AgentGuard does today
+      options:
+        - Catches it (I'm adding coverage / a test)
+        - Flags it at the wrong level (e.g. logs when it should block)
+        - Misses it entirely
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected verdict and signal
+      placeholder: "REVIEW, taint:exfiltration"
+  - type: textarea
+    id: refs
+    attributes:
+      label: References
+      description: A writeup, paper or OWASP / ATLAS identifier, if there is one.

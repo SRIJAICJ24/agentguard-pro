@@ -1,0 +1,58 @@
+name: False positive report
+description: AgentGuard flagged or blocked ordinary work. These reports are how accuracy improves.
+labels: [false-positive]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful report is an **anonymized export**. It contains verdicts, signals and
+        versions, but no arguments. Home paths, your user name and secrets are scrubbed:
+
+        ```
+        agentguard report --since 7d --fp-review          # label the flags tp / fp / unsure
+        agentguard report --since 7d --export fp.csv      # then attach fp.csv here
+        ```
+
+        Open the file before attaching it. If you add a command line or tool input by hand,
+        replace anything private in it.
+  - type: textarea
+    id: what
+    attributes:
+      label: What were you doing, and what did AgentGuard flag?
+      description: e.g. "clearing a build cache with rm -rf build/ -> hook:destructive_command, REVIEW"
+    validations:
+      required: true
+  - type: textarea
+    id: signals
+    attributes:
+      label: Signals and verdict
+      description: From `agentguard audit --last 20` (the signals column), or the export.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: call
+    attributes:
+      label: The tool call (anonymized), if you can share it
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Detector and policy version
+      description: The first line of the export, or `agentguard status`.
+      placeholder: "detector 2026.10.5, policy p-68f143cdb5"
+    validations:
+      required: true
+  - type: textarea
+    id: replay
+    attributes:
+      label: "`agentguard replay` numbers (optional, very welcome)"
+      description: Totals only. Run it before and after you change the policy, if you did.
+      render: text
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Checks
+      options:
+        - label: I removed secrets, user names and private paths from everything above.
+          required: true

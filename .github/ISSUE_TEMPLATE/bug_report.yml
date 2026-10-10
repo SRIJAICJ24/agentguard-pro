@@ -1,0 +1,51 @@
+name: Bug report
+description: AgentGuard crashed, hung, or did something other than what its docs say.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! For a **security vulnerability** (a bypass of a hard-enforced rule, a secret
+        reaching the audit log), please don't use this form. Use the repository's private
+        "Report a vulnerability" button under the Security tab instead.
+
+        Before pasting anything, replace secrets, user names and private paths.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands, or the tool call that triggered it.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: "`agentguard status` output"
+      description: It shows the package, detector and policy versions, and the daemon state.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`agentguard doctor` output"
+      render: text
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux, WSL, Other]
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.4"
