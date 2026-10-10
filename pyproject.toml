@@ -1,12 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentguard"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-first runtime security gateway for AI agents: Claude Code hooks and an MCP proxy"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 keywords = ["ai-agents", "security", "mcp", "claude-code", "prompt-injection", "dlp"]
 classifiers = [
@@ -27,6 +29,11 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
 ]
+
+[project.urls]
+Homepage = "https://github.com/SRIJAICJ24/agentguard-pro"
+Issues = "https://github.com/SRIJAICJ24/agentguard-pro/issues"
+Security = "https://github.com/SRIJAICJ24/agentguard-pro/security/policy"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
