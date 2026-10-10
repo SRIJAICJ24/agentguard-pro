@@ -23,7 +23,10 @@ classifiers = [
     "Topic :: Security",
 ]
 dependencies = [
-    "fastmcp>=3.0",
+    # Capped at the majors AgentGuard is tested on: fastmcp 4 / mcp 2 broke
+    # gateway enforcement (first CI run, 2026-10-10). Raise only with a passing suite.
+    "fastmcp>=3.0,<4",
+    "mcp>=1.0,<2",
     "detect-secrets>=1.5",
     "pyyaml>=6.0",
     "fastapi>=0.110",

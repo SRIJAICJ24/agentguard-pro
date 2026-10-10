@@ -64,3 +64,21 @@ def test_the_examples_script_still_starts_a_server():
     out = subprocess.run([sys.executable, str(ROOT / "examples" / "mock_mcp_server.py"), "--help"],
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0 and "--transport" in out.stdout, out.stderr
+
+
+def test_mcp_dependencies_are_capped_at_the_tested_major():
+    """Regression (first GitHub CI run, 2026-10-10): `fastmcp>=3.0` let a fresh
+    install resolve fastmcp 4.1 / mcp 2.3, under which the MCP gateway silently
+    stopped enforcing (32 failures; the demo printed NOT BLOCKED). Each MCP
+    dependency must have an upper bound until a new major is tested."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    deps = {Requirement(d).name: Requirement(d)
+            for d in tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+            ["project"]["dependencies"]}
+    for name, untested in (("fastmcp", "4.0"), ("mcp", "2.0")):
+        assert name in deps, f"{name} must be declared directly, with a cap"
+        assert untested not in deps[name].specifier, f"{name} {untested} is not tested"
+        assert any(s.operator == "<" for s in deps[name].specifier), name
