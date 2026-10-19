@@ -246,7 +246,7 @@ target this project's `.claude/settings.json` / `settings.local.json` instead.
 
 | Tool | What AgentGuard checks |
 |---|---|
-| `Bash` / `PowerShell` | secrets and credential paths anywhere in the command. Network commands (`curl`, `wget`, `nc`, `scp`, `Invoke-WebRequest`, …) to hosts outside `hooks.allow_hosts` join the **exfiltration** tier. `git commit`/`push` and output redirected into files join the **propagation** tier. Recursive deletes and disk-level commands → **REVIEW**. All patterns live in `agentguard.policy.yaml` under `hooks.bash` |
+| `Bash` / `PowerShell` | secrets and credential paths anywhere in the command. Network commands (`curl`, `wget`, `nc`, `scp`, `Invoke-WebRequest`, …) to hosts outside `hooks.allow_hosts` join the **exfiltration** tier. `git commit`/`push` and output redirected into files join the **propagation** tier. Recursive deletes and disk-level commands → **REVIEW**, except deletes provably inside the temp folder or a folder you list in `hooks.trusted_delete_dirs` (followed into `bash -c "..."` and `wsl.exe -e bash -c`). All patterns live in `agentguard.policy.yaml` under `hooks.bash` |
 | `Read` / `Write` / `Edit` | path denylist; secret scan on written content; writes join the propagation tier (worm detection, DLP) |
 | `WebFetch` / `WebSearch` | results are **untrusted** and fingerprinted into the session's taint map, so a later `Write` or `curl` of that text is caught |
 | Shell fetches, browser pages | the output of `curl`/`wget`/`Invoke-WebRequest` to a host outside the allowlist, and MCP tools that return page text (`get_page_text`, `read_page`, `hooks.untrusted_mcp_tools`), are untrusted too. Following a link isn't sending data: for the exfiltration check a URL counts only by its query string |
@@ -737,7 +737,7 @@ everything would be worse than no score at all.
 python -m pytest tests/ -q
 ```
 
-560 tests, one file per stage. The ones that matter most are the four attack
+593 tests, one file per stage. The ones that matter most are the four attack
 reproductions in
 [`tests/test_stage25_taint_quarantine.py`](tests/test_stage25_taint_quarantine.py):
 
@@ -976,7 +976,7 @@ docs/standards-mapping.md   OWASP LLM 2026 / Agentic Top 10 / ACS mapping
 docs/claude-code-hooks-notes.md   verified hook schema + design notes
 examples/mock_mcp_server.py
 examples/safe_first_run.py + .md   disposable sandbox for the first real run
-tests/           560 tests, one file per stage
+tests/           593 tests, one file per stage
 ```
 
 This is v2 of an earlier hackathon project ("Agent-Guard").

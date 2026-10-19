@@ -284,6 +284,10 @@ class HooksConfig:
     # shell fetches, not WebFetch/WebSearch (replay: ~520 of ~580 page reads), and
     # none of it was tainted. The output of a Bash/PowerShell network command to a
     # host outside the egress allowlist is untrusted...
+    # Folders whose contents the agent may delete recursively without REVIEW
+    # (`hook:delete_in_trusted_dir`), e.g. ["~/myproject/test-output"]. Only
+    # targets strictly inside; homes, roots and top-level folders are refused.
+    trusted_delete_dirs: list[str] = field(default_factory=list)
     network_results_untrusted: bool = True
     # ...and so are results of MCP tools that return page text, matched against the
     # inner tool name, on top of `taint.untrusted_tools`. New keys, so a policy
@@ -319,6 +323,12 @@ def _hooks_from_dict(data: dict[str, Any]) -> HooksConfig:
     if data.get("untrusted_tools") is not None:
         h.untrusted_tools = _as_list(data.get("untrusted_tools"))
     h.temp_deletes_ok = bool(data.get("temp_deletes_ok", h.temp_deletes_ok))
+    if data.get("trusted_delete_dirs") is not None:
+        from agentguard.shellcmd import validate_trusted_dir
+
+        h.trusted_delete_dirs = _as_list(data.get("trusted_delete_dirs"))
+        for entry in h.trusted_delete_dirs:
+            validate_trusted_dir(entry)
     h.network_results_untrusted = bool(data.get("network_results_untrusted",
                                                 h.network_results_untrusted))
     if data.get("untrusted_mcp_tools") is not None:

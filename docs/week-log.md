@@ -13,7 +13,8 @@ in them came from the same code and the same rules, so:
 |---|---|---|---|---|---|---|
 | `week1` | `2026.10.3` | `p-78e342c112` | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week1`, non-editable, venv `D:/agentguard-week` | **2026-10-03** (frozen 2026-10-02; the daemon first answered from the venv at about 04:40 UTC, first hook row is audit #14 at 04:41 UTC) | ends when `week2` is installed |
 | `week2` | `2026.10.4` | `p-68f143cdb5` (the week1 live policy file, unchanged, hashes to this under week2 code: the new `temp_deletes_ok` setting defaults to true) | `D:/agentguard-week/agentguard.policy.yaml` | wheel from `week2`, non-editable, same venv | never installed: the live daemon still ran week1 code on 2026-10-10 (its health reply carries no version fields) | superseded by `week3` |
-| `week3` | `2026.10.5` | `p-f27874a375` (the unchanged live file and the shipped file both hash to this under week3 code) | same live file | wheel `agentguard-0.4.0` from `week3`, non-editable, same venv | starts when the user installs it | — |
+| `week3` | `2026.10.5` | `p-f27874a375` (the unchanged live file and the shipped file both hash to this under week3 code) | same live file | wheel `agentguard-0.4.0` from `week3`, non-editable, same venv | installed 2026-10-19 (daemon health confirmed 0.4.0 / 2026.10.5 / p-f27874a375) | superseded by `week4` |
+| `week4` | `2026.10.6` | `p-b81428c2d4` with `trusted_delete_dirs: ["~/bbtest"]` added to the live file (`p-0cf2eccf8f` if the file is left unchanged) | same live file | wheel `agentguard-0.4.1` from `week4`, same venv | starts when the user installs it | — |
 
 ## Why week2 exists: week 1 accuracy, measured
 
@@ -123,3 +124,21 @@ Also in week3, unrelated to detection: the detector fingerprint no longer depend
 Python version (`ast.dump` changed in 3.13). Same code, same version number, new
 fingerprint `1d80675375f3`. Both pre-existing policy hashes change only because the
 hooks settings gained two fields.
+
+## Why week4 exists: trusted delete folders
+
+Review items #8 and #9 (2026-10-16) were `rm -rf logs` inside the game's WSL test folder,
+run as `wsl.exe -d Ubuntu -e bash -c "cd ~/bbtest && rm -rf logs && ..."`. In enforce
+mode each one asked for permission. These were false alarms. Two changes (detector
+2026.10.6):
+
+- `hooks.trusted_delete_dirs`: recursive deletes whose every target is strictly inside a
+  listed folder are logged as `hook:delete_in_trusted_dir` instead of going to REVIEW.
+  Home folders, roots and top-level folders are refused when the policy loads.
+- Deletes inside `bash -c "..."` scripts, including through `wsl.exe -e bash -c`, are now
+  analysed as their own shell (own variables and `cd`), for temp and trusted folders
+  alike. Before, any delete inside one counted as unprovable.
+
+Replay of 9,307 real calls: destructive flags 27 -> 22 with `~/bbtest` trusted (the 5
+removed are the WSL test runs). Hard blocks are 34 either way, and so are temp
+deletes (108).

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentguard"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local-first runtime security gateway for AI agents: Claude Code hooks and an MCP proxy"
 readme = "README.md"
 license = "Apache-2.0"

@@ -76,7 +76,7 @@ from agentguard.scanner import (
     scan_paths,
 )
 from agentguard.scope import ScopeStore
-from agentguard.shellcmd import only_mentioned, only_temp_deletes
+from agentguard.shellcmd import normalize_dir, only_mentioned, safe_delete_kinds
 from agentguard.sinks import SinkClassifier
 from agentguard.taint import UNTRUSTED, TaintMap, TaintRegistry
 from agentguard.workspace import workspace_label
@@ -542,7 +542,16 @@ class HookEngine:
             call.tiers.append(TIER_PROPAGATION)
         destructive = matches("destructive")
         starts = [m.start() for p in destructive for m in re.finditer(p, command, re.IGNORECASE)]
-        if destructive and hooks.temp_deletes_ok and only_temp_deletes(command, starts):
+        trusted = tuple(normalize_dir(d) for d in hooks.trusted_delete_dirs)
+        kinds = safe_delete_kinds(command, starts, trusted,
+                                  allow_temp=hooks.temp_deletes_ok) if destructive else None
+        if kinds and "trusted" in kinds:
+            call.signals.append(Signal(
+                "hook:delete_in_trusted_dir", 0.0,
+                "recursive delete; every target is inside a temp directory or a folder "
+                "listed in hooks.trusted_delete_dirs",
+            ))
+        elif kinds:
             call.signals.append(Signal(
                 "hook:delete_in_temp", 0.0,
                 "recursive delete; every target is inside a temp directory",

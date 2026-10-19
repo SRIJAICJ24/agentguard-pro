@@ -213,6 +213,7 @@ class _Expanded:
 
 
 def _expand(word: str, env: dict[str, str]) -> _Expanded:
+    word = word.replace("\\$", "$")         # \$HOME in a bash -c "..." script
     if "$(" in word or "`" in word:
         return _Expanded(word[:word.find("$(") if "$(" in word else word.find("`")], False)
     if word == "~" or word.startswith(("~/", "~\\")):
@@ -252,20 +253,61 @@ def _join(cwd: str | None, path: str) -> str | None:
     return posixpath.join(cwd.replace("\\", "/"), path.replace("\\", "/"))
 
 
-def _target_in_temp(word: str, env: dict[str, str], cwd: str | None) -> bool:
+def _resolve(word: str, env: dict[str, str], cwd: str | None) -> str | None:
     exp = _expand(word, env)
     fixed = exp.fixed
-    if HOME in fixed:
-        return False
     if not exp.complete:
         # Something after `fixed` is unknown. Safe only if, whatever it is, the
-        # result stays below a temp directory: `fixed` must end inside one.
+        # result stays below the safe folder: `fixed` must end inside it.
         if not fixed or fixed.endswith(("/", "\\")):
             fixed = fixed.rstrip("/\\")
             if not fixed:
-                return False
-    full = _join(cwd, fixed)
-    return full is not None and strictly_inside_temp(full)
+                return None
+    return _join(cwd, fixed)
+
+
+def normalize_dir(entry: str) -> str:
+    """A trusted-folder entry in the form targets are compared in: `~` and
+    `$HOME` become the home marker, separators `/`, lower case, no trailing `/`."""
+    e = entry.strip()
+    if e == "~" or e.startswith(("~/", "~\\")):
+        e = HOME + e[1:]
+    e = re.sub(r"(?i)^\$(home|\{home\}|env:userprofile)|^%userprofile%", HOME, e)
+    return _norm(e).rstrip("/")
+
+
+def validate_trusted_dir(entry: str) -> str:
+    """Normalized entry, or ValueError for a home folder, a drive or filesystem
+    root, or a top-level folder - trusting deletes there would trust everything."""
+    norm = normalize_dir(entry)
+    parts = [p for p in norm.split("/") if p]
+    if ".." in parts or len(parts) < 2 or norm in ("", HOME):
+        raise ValueError(f"hooks.trusted_delete_dirs: {entry!r} is too broad - name a "
+                         f"specific folder such as ~/myproject/build")
+    return norm
+
+
+def _strictly_inside(path: str, root: str) -> bool:
+    p = _norm(path).rstrip("/")
+    if ".." in p.split("/"):
+        return False
+    return p.startswith(root + "/") and len(p) > len(root) + 1
+
+
+def _target_kind(word: str, env: dict[str, str], cwd: str | None,
+                 trusted: tuple[str, ...]) -> str | None:
+    full = _resolve(word, env, cwd)
+    if full is None:
+        return None
+    if HOME not in full and strictly_inside_temp(full):
+        return "temp"
+    if any(_strictly_inside(full, t) for t in trusted):
+        return "trusted"
+    return None
+
+
+def _target_in_temp(word: str, env: dict[str, str], cwd: str | None) -> bool:
+    return _target_kind(word, env, cwd, ()) == "temp"
 
 
 # --- deletes ------------------------------------------------------------------
@@ -307,9 +349,27 @@ class DeleteCheck:
     end: int
     targets: list[str]
     in_temp: bool
+    kind: str | None = None          # "temp", "trusted", or None (not provably safe)
 
 
-def delete_checks(command: str) -> list[DeleteCheck]:
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+_DASH_C = re.compile(r"(?<!\S)-c\s+([\"'])")
+
+
+def _nested_script(command: str, cmd: SimpleCommand) -> tuple[int, int] | None:
+    """Span of the script in `bash -c "..."` (also after `wsl.exe ... -e`)."""
+    if not any(_verb(w) in _SHELLS for w in cmd.words) or "-c" not in cmd.words:
+        return None
+    m = _DASH_C.search(command, cmd.start, cmd.end)
+    if m is None:
+        return None
+    quote, i = m.group(1), m.end()
+    while i < cmd.end and command[i] != quote:
+        i += 2 if (quote == '"' and command[i] == "\\") else 1
+    return (m.end(), i) if i <= cmd.end else None
+
+
+def delete_checks(command: str, trusted: tuple[str, ...] = ()) -> list[DeleteCheck]:
     """Every delete command in `command`, and whether all its targets are in temp.
 
     A relative target counts only after a `cd` into temp in the same command. The
@@ -352,29 +412,51 @@ def delete_checks(command: str) -> list[DeleteCheck]:
         if cmd.verb in ("cd", "pushd", "set-location", "sl", "chdir"):
             dest = next((a for a in cmd.args if not a.startswith("-")), None)
             exp = _expand(dest, env) if dest else None
-            if exp is None or not exp.complete or HOME in exp.fixed:
+            if exp is None or not exp.complete:
                 here = None
             else:
-                here = _join(here, exp.fixed)
+                here = _join(here, exp.fixed)       # home paths too: trusted folders
+            continue
+        nested = _nested_script(command, cmd)
+        if nested is not None:
+            # A separate shell: its own variables and working directory.
+            for sub in delete_checks(command[nested[0]:nested[1]], trusted):
+                sub.start += nested[0]
+                sub.end += nested[0]
+                checks.append(sub)
             continue
         if cmd.verb in _DELETE_VERBS:
             targets = _delete_targets(cmd)
-            ok = bool(targets) and all(_target_in_temp(t, env, here) for t in targets)
-            checks.append(DeleteCheck(cmd.start, cmd.end, targets, ok))
+            kinds = [_target_kind(t, env, here, trusted) for t in targets]
+            kind = None if not kinds or None in kinds else (
+                "temp" if set(kinds) == {"temp"} else "trusted")
+            checks.append(DeleteCheck(cmd.start, cmd.end, targets, kind == "temp", kind))
     return checks
+
+
+def safe_delete_kinds(command: str, match_starts: list[int],
+                      trusted: tuple[str, ...] = (), *, allow_temp: bool = True) -> set[str] | None:
+    """The kinds of safe folder ("temp", "trusted") every destructive-pattern match
+    deletes into, or None if any match isn't provably a delete inside one."""
+    if not match_starts:
+        return None
+    checks = delete_checks(command, tuple(trusted))
+    kinds: set[str] = set()
+    for pos in match_starts:
+        owners = [c for c in checks if c.start <= pos < c.end]
+        if not owners:
+            return None
+        owner = min(owners, key=lambda c: c.end - c.start)       # innermost
+        if owner.kind is None or (owner.kind == "temp" and not allow_temp):
+            return None
+        kinds.add(owner.kind)
+    return kinds
 
 
 def only_temp_deletes(command: str, match_starts: list[int]) -> bool:
     """True if every destructive-pattern match lies in a delete whose targets are
     all inside a temp directory."""
-    if not match_starts:
-        return False
-    checks = delete_checks(command)
-    for pos in match_starts:
-        owner = next((c for c in checks if c.start <= pos < c.end), None)
-        if owner is None or not owner.in_temp:
-            return False
-    return True
+    return safe_delete_kinds(command, match_starts) == {"temp"}
 
 
 # --- credential paths: read, or only mentioned? ---------------------------------

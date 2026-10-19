@@ -185,6 +185,11 @@ hooks:
   # hook:delete_in_temp instead of going to REVIEW. Unknown variables, `..`,
   # the temp root itself and anything outside temp still go to REVIEW.
   temp_deletes_ok: true
+  # Folders whose contents the agent may delete recursively without REVIEW,
+  # logged as hook:delete_in_trusted_dir. Deletes inside `bash -c "..."` (also
+  # through `wsl.exe -e bash -c`) are followed. Only targets strictly inside a
+  # listed folder count; homes, drive roots and top-level folders are refused.
+  # trusted_delete_dirs: ["~/myproject/test-output"]
   # Taint sources beyond untrusted_tools (week 3). The output of a Bash or
   # PowerShell network command to a host outside the allowlist is untrusted,
   # and so is the result of an MCP tool returning page text (inner tool name).
